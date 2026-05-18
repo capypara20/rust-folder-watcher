@@ -94,7 +94,12 @@ target           = "file"                # file / directory / both
 include_hidden   = false
 patterns         = ["*.csv", "*.xlsx"]   # glob（regex と排他）
 # regex          = ".*\\.csv$"           # 正規表現（patterns と排他）
-exclude_patterns = ["temp_*"]
+exclude_patterns = ["temp_*"]            # glob（exclude_regex と排他）
+# exclude_regex  = "^temp_"             # 正規表現（exclude_patterns と排他）
+dir_patterns     = ["incoming", "drop"]  # 包含フォルダ名 glob（dir_regex と排他）
+# dir_regex      = "^drop_\\d+"         # 包含フォルダ名 正規表現（dir_patterns と排他）
+exclude_dir_patterns = ["node_modules"]  # 除外フォルダ名 glob（exclude_dir_regex と排他）
+# exclude_dir_regex  = "^\\..*"         # 除外フォルダ名 正規表現（exclude_dir_patterns と排他）
 events           = ["create", "modify"]  # create / modify / delete / rename
 
 # ── ルール別ログ（省略可）──────────────────────────────────────────────────
@@ -122,6 +127,52 @@ type        = "command"
 shell       = "powershell"               # cmd / powershell / pwsh
 command     = "Write-Host 'Backed up: {Name} -> {Destination}'"
 working_dir = ""
+```
+
+## フィルタ設定
+
+ファイル名・フォルダ名それぞれに包含・除外フィルタを設定できます。各カテゴリで **glob と regex は排他**（両方設定するとバリデーションエラー）。
+
+| | ファイル名 | フォルダ名 |
+|---|---|---|
+| **包含** | `patterns` / `regex` | `dir_patterns` / `dir_regex` |
+| **除外** | `exclude_patterns` / `exclude_regex` | `exclude_dir_patterns` / `exclude_dir_regex` |
+
+### フォルダフィルタの動作
+
+`dir_patterns` / `dir_regex` は、イベントパスを監視ルートからの相対パスに変換し、その**親ディレクトリ成分のいずれか**にマッチすれば通過します。
+
+```
+watch_path = C:\project、dir_patterns = ["src"] の場合:
+
+C:\project\src\main.rs          → 親: [src]             ✅ src にマッチ → 通過
+C:\project\lib\utils.rs         → 親: [lib]             ❌ マッチなし → 除外
+C:\project\packages\app\src\index.ts → 親: [packages, app, src]  ✅ src にマッチ → 通過
+C:\project\config.toml          → 親: []（なし）         ❌ マッチなし → 除外
+```
+
+> **注意**: 監視ルート直下のファイルはフォルダを経由しないため、`dir_patterns` / `dir_regex` が設定されていると常に除外されます。
+
+### 除外優先ルール
+
+包含フィルタと除外フィルタが同じフォルダ・ファイルにマッチする場合、**除外が優先**されます。
+
+```
+dir_patterns         = ["src"]
+exclude_dir_patterns = ["src"]
+
+→ src 配下のファイルは包含チェックを通過するが、その後の除外チェックで除外される
+→ 結果: 何も検知されない（設定の矛盾に注意）
+```
+
+実用的な組み合わせ例:
+
+```
+dir_patterns         = ["src"]           # src フォルダ配下のみ対象
+exclude_dir_patterns = ["node_modules"]  # ただし node_modules は除外
+
+→ src\components\Button.ts    ✅（src にマッチ、node_modules なし）
+→ src\node_modules\react\index.ts  ❌（node_modules が除外優先）
 ```
 
 ## アクションの種類
@@ -170,7 +221,8 @@ CSV の列順（1 行目はヘッダー、自動でスキップ）：
 
 ```
 rule_name, enabled, watch_path, recursive, target, include_hidden,
-patterns, regex, exclude_patterns, events,
+patterns, regex, exclude_patterns, exclude_regex,
+dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex, events,
 action_type, destination, overwrite, preserve_structure, verify_integrity,
 shell, command, program, args, working_dir, message
 ```
@@ -202,6 +254,11 @@ shell, command, program, args, working_dir, message
 
 ```
 2026-05-07 10:30:20 │ INFO    │                             │ cat-watcher 起動
+2026-05-07 10:30:20 │ INFO    │                             │ 監視ルール [csv-backup]  パス=C:\data\incoming  イベント=作成, 変更  サブフォルダ=あり
+2026-05-07 10:30:20 │ INFO    │                             │   包含ファイル: *.csv, *.xlsx
+2026-05-07 10:30:20 │ INFO    │                             │   除外ファイル: temp_*
+2026-05-07 10:30:20 │ INFO    │                             │   包含フォルダ: incoming, drop
+2026-05-07 10:30:20 │ INFO    │                             │   除外フォルダ: node_modules
 2026-05-07 10:30:20 │ MATCH   │ Create,Modify               │ C:\data\report.csv
 2026-05-07 10:30:20 │ ├1 log  │                             │ 
 2026-05-07 10:30:20 │ │   OK  │                             │ 検知: report.csv
