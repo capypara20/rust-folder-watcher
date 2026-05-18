@@ -50,6 +50,11 @@ pub struct CompiledRule{
 	pub events: Vec<Event>,
 	pub glob_set: Option<GlobSet>,
 	pub exclude_glob_set: Option<GlobSet>,
+	pub exclude_regex: Option<Regex>,
+	pub exclude_dir_glob_set: Option<GlobSet>,
+	pub exclude_dir_regex: Option<Regex>,
+	pub dir_glob_set: Option<GlobSet>,
+	pub dir_regex: Option<Regex>,
 	pub regexes: Option<Regex>,
 	pub actions: Vec<ActionConfig>,
 	pub rule_logger: Option<Arc<Logger>>,
@@ -86,6 +91,44 @@ pub fn compile_rules(rules: &[Rule], global: &Global) -> Result<(Vec<CompiledRul
 		} else {
 			None
 		};
+
+		let exclude_regex = if let Some(re_str) = &rule.watch.exclude_regex {
+			Some(Regex::new(re_str).map_err(|e| AppError::Watch(e.to_string()))?)
+		} else {
+			None
+		};
+
+		let exclude_dir_glob_set = if !rule.watch.exclude_dir_patterns.is_empty() {
+			let mut builder = GlobSetBuilder::new();
+			for p in &rule.watch.exclude_dir_patterns {
+				builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
+			}
+			Some(builder.build().map_err(|e| AppError::Watch(e.to_string()))?)
+		} else {
+			None
+		};
+
+		let exclude_dir_regex = if let Some(re_str) = &rule.watch.exclude_dir_regex {
+			Some(Regex::new(re_str).map_err(|e| AppError::Watch(e.to_string()))?)
+		} else {
+			None
+		};
+
+		let dir_glob_set = if !rule.watch.dir_patterns.is_empty() {
+			let mut builder = GlobSetBuilder::new();
+			for p in &rule.watch.dir_patterns {
+				builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
+			}
+			Some(builder.build().map_err(|e| AppError::Watch(e.to_string()))?)
+		} else {
+			None
+		};
+
+		let dir_regex = if let Some(re_str) = &rule.watch.dir_regex {
+			Some(Regex::new(re_str).map_err(|e| AppError::Watch(e.to_string()))?)
+		} else {
+			None
+		};
 		
 		let rule_logger = if let Some(rule_log) = &rule.log {
 			if rule_log.enabled {
@@ -117,6 +160,11 @@ pub fn compile_rules(rules: &[Rule], global: &Global) -> Result<(Vec<CompiledRul
 			events: rule.watch.events.clone(),
 			glob_set,
 			exclude_glob_set,
+			exclude_regex,
+			exclude_dir_glob_set,
+			exclude_dir_regex,
+			dir_glob_set,
+			dir_regex,
 			regexes,
 			actions: rule.actions.clone(),
 			rule_logger,
@@ -142,12 +190,7 @@ fn evaluate_rule(
         if path.parent() != Some(watch_path) { return false; }
     }
 
-    let file_name = match path.file_name().and_then(|n| n.to_str()) {
-		Some(name) => name,
-		None => return false, // ファイル名が UTF-8 でない場合はルール不適用
-	};
-
-    if !matches_pattern(&file_name, rule) { return false; }
+    if !matches_pattern(path, rule) { return false; }
     if !matches_events(detected_events, &rule.events) { return false; }
 
     true
@@ -182,8 +225,13 @@ fn matches_hidden(_path: &Path, _include_hidden: bool) -> bool {
     true  // 今は常に通過
 }
 
-/// patterns / exclude_patterns / regex マッチ
-fn matches_pattern(file_name: &str, rule: &CompiledRule) -> bool{
+/// patterns / exclude_patterns / regex / exclude_dir_* マッチ
+fn matches_pattern(path: &Path, rule: &CompiledRule) -> bool{
+	let file_name = match path.file_name().and_then(|n| n.to_str()) {
+		Some(name) => name,
+		None => return false,
+	};
+
 	if let Some(glob_set) = &rule.glob_set {
 		if !glob_set.is_match(file_name) {
 			return false;
@@ -196,9 +244,59 @@ fn matches_pattern(file_name: &str, rule: &CompiledRule) -> bool{
 		}
 	}
 
+	if let Some(exclude_regex) = &rule.exclude_regex {
+		if exclude_regex.is_match(file_name) {
+			return false;
+		}
+	}
+
 	if let Some(regexes) = &rule.regexes {
 		if !regexes.is_match(file_name) {
 			return false;
+		}
+	}
+
+	// ディレクトリ名包含: watch_path からの相対パスの親コンポーネントの少なくとも1つがマッチすること
+	if rule.dir_glob_set.is_some() || rule.dir_regex.is_some() {
+		let watch_root = Path::new(&rule.watch_path);
+		if let Ok(rel) = path.strip_prefix(watch_root) {
+			let rel_parent = rel.parent().unwrap_or(Path::new(""));
+			let matched = rel_parent.components().any(|component| {
+				if let std::path::Component::Normal(os_name) = component {
+					if let Some(dir_name) = os_name.to_str() {
+						if let Some(gs) = &rule.dir_glob_set {
+							if gs.is_match(dir_name) { return true; }
+						}
+						if let Some(re) = &rule.dir_regex {
+							if re.is_match(dir_name) { return true; }
+						}
+					}
+				}
+				false
+			});
+			if !matched { return false; }
+		} else {
+			return false;
+		}
+	}
+
+	// ディレクトリ名除外: watch_path からの相対パスの各ディレクトリコンポーネントを評価
+	if rule.exclude_dir_glob_set.is_some() || rule.exclude_dir_regex.is_some() {
+		let watch_root = Path::new(&rule.watch_path);
+		if let Ok(rel) = path.strip_prefix(watch_root) {
+			let rel_parent = rel.parent().unwrap_or(Path::new(""));
+			for component in rel_parent.components() {
+				if let std::path::Component::Normal(os_name) = component {
+					if let Some(dir_name) = os_name.to_str() {
+						if let Some(gs) = &rule.exclude_dir_glob_set {
+							if gs.is_match(dir_name) { return false; }
+						}
+						if let Some(re) = &rule.exclude_dir_regex {
+							if re.is_match(dir_name) { return false; }
+						}
+					}
+				}
+			}
 		}
 	}
 
@@ -342,6 +440,11 @@ mod tests {
             events: vec![Event::Create],
             glob_set,
             exclude_glob_set: None,
+            exclude_regex: None,
+            exclude_dir_glob_set: None,
+            exclude_dir_regex: None,
+            dir_glob_set: None,
+            dir_regex: None,
             regexes: None,
             actions: vec![],
             rule_logger: None,
@@ -507,5 +610,245 @@ mod tests {
         assert!(!matches_target(path, &WatchTarget::Directory, None));
         // target=both は通る
         assert!(matches_target(path, &WatchTarget::Both, None));
+    }
+
+    // -----------------------------------------------------------------
+    // exclude_regex: ファイル名正規表現除外 (#28)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_exclude_regex_excludes_matching_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("debug_001.log");
+        std::fs::write(&file, "").unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), false, None);
+        rule.exclude_regex = Some(Regex::new(r"^debug_\d+").unwrap());
+        let events = create_events(Event::Create);
+
+        assert!(!evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_exclude_regex_passes_non_matching_file() {
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("report_001.log");
+        std::fs::write(&file, "").unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), false, None);
+        rule.exclude_regex = Some(Regex::new(r"^debug_\d+").unwrap());
+        let events = create_events(Event::Create);
+
+        assert!(evaluate_rule(&file, &events, None, &rule));
+    }
+
+    // -----------------------------------------------------------------
+    // exclude_dir_patterns: フォルダ名 glob 除外 (#28)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_exclude_dir_patterns_excludes_file_in_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let node_modules = dir.path().join("node_modules");
+        std::fs::create_dir(&node_modules).unwrap();
+        let file = node_modules.join("index.js");
+        std::fs::write(&file, "").unwrap();
+
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("node_modules").unwrap());
+        let gs = builder.build().unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.exclude_dir_glob_set = Some(gs);
+        let events = create_events(Event::Create);
+
+        assert!(!evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_exclude_dir_patterns_passes_file_in_non_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let file = src.join("main.rs");
+        std::fs::write(&file, "").unwrap();
+
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("node_modules").unwrap());
+        let gs = builder.build().unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.exclude_dir_glob_set = Some(gs);
+        let events = create_events(Event::Create);
+
+        assert!(evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_exclude_dir_patterns_nested_dir_excluded() {
+        let dir = TempDir::new().unwrap();
+        let parent = dir.path().join("packages");
+        let node_modules = parent.join("node_modules");
+        std::fs::create_dir_all(&node_modules).unwrap();
+        let file = node_modules.join("dep.js");
+        std::fs::write(&file, "").unwrap();
+
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("node_modules").unwrap());
+        let gs = builder.build().unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.exclude_dir_glob_set = Some(gs);
+        let events = create_events(Event::Create);
+
+        assert!(!evaluate_rule(&file, &events, None, &rule));
+    }
+
+    // -----------------------------------------------------------------
+    // exclude_dir_regex: フォルダ名正規表現除外 (#28)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_exclude_dir_regex_excludes_file_in_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let hidden = dir.path().join(".cache");
+        std::fs::create_dir(&hidden).unwrap();
+        let file = hidden.join("data.bin");
+        std::fs::write(&file, "").unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.exclude_dir_regex = Some(Regex::new(r"^\.").unwrap());
+        let events = create_events(Event::Create);
+
+        assert!(!evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_exclude_dir_regex_passes_file_in_non_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let visible = dir.path().join("data");
+        std::fs::create_dir(&visible).unwrap();
+        let file = visible.join("report.csv");
+        std::fs::write(&file, "").unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.exclude_dir_regex = Some(Regex::new(r"^\.").unwrap());
+        let events = create_events(Event::Create);
+
+        assert!(evaluate_rule(&file, &events, None, &rule));
+    }
+
+    // -----------------------------------------------------------------
+    // dir_patterns: フォルダ名 glob 包含 (#28)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_dir_patterns_includes_file_in_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        let file = src.join("main.rs");
+        std::fs::write(&file, "").unwrap();
+
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("src").unwrap());
+        let gs = builder.build().unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.dir_glob_set = Some(gs);
+        let events = create_events(Event::Create);
+
+        assert!(evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_dir_patterns_excludes_file_in_non_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let lib = dir.path().join("lib");
+        std::fs::create_dir(&lib).unwrap();
+        let file = lib.join("utils.rs");
+        std::fs::write(&file, "").unwrap();
+
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("src").unwrap());
+        let gs = builder.build().unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.dir_glob_set = Some(gs);
+        let events = create_events(Event::Create);
+
+        assert!(!evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_dir_patterns_direct_child_not_matched() {
+        // watch 直下のファイルはディレクトリコンポーネントが存在しないためマッチしない
+        let dir = TempDir::new().unwrap();
+        let file = dir.path().join("root.csv");
+        std::fs::write(&file, "").unwrap();
+
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("src").unwrap());
+        let gs = builder.build().unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), false, None);
+        rule.dir_glob_set = Some(gs);
+        let events = create_events(Event::Create);
+
+        assert!(!evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_dir_patterns_nested_dir_matched() {
+        // 深いネストでも途中にマッチするフォルダがあれば通る
+        let dir = TempDir::new().unwrap();
+        let nested = dir.path().join("packages").join("src").join("components");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("button.tsx");
+        std::fs::write(&file, "").unwrap();
+
+        let mut builder = GlobSetBuilder::new();
+        builder.add(Glob::new("src").unwrap());
+        let gs = builder.build().unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.dir_glob_set = Some(gs);
+        let events = create_events(Event::Create);
+
+        assert!(evaluate_rule(&file, &events, None, &rule));
+    }
+
+    // -----------------------------------------------------------------
+    // dir_regex: フォルダ名正規表現包含 (#28)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_dir_regex_includes_file_in_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let reports = dir.path().join("reports_2024");
+        std::fs::create_dir(&reports).unwrap();
+        let file = reports.join("data.csv");
+        std::fs::write(&file, "").unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.dir_regex = Some(Regex::new(r"^reports_\d+$").unwrap());
+        let events = create_events(Event::Create);
+
+        assert!(evaluate_rule(&file, &events, None, &rule));
+    }
+
+    #[test]
+    fn test_dir_regex_excludes_file_in_non_matching_dir() {
+        let dir = TempDir::new().unwrap();
+        let other = dir.path().join("archives");
+        std::fs::create_dir(&other).unwrap();
+        let file = other.join("data.csv");
+        std::fs::write(&file, "").unwrap();
+
+        let mut rule = make_rule(dir.path().to_str().unwrap(), true, None);
+        rule.dir_regex = Some(Regex::new(r"^reports_\d+$").unwrap());
+        let events = create_events(Event::Create);
+
+        assert!(!evaluate_rule(&file, &events, None, &rule));
     }
 }
