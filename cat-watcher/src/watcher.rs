@@ -50,14 +50,6 @@ pub async fn start_watching(
             RecursiveMode::NonRecursive
         };
 
-        let pattern_str = if let Some(pats) = &rule.watch.patterns {
-            pats.join(", ")
-        } else if let Some(re) = &rule.watch.regex {
-            format!("regex: {re}")
-        } else {
-            "*".to_string()
-        };
-
         let events_str = rule
             .watch
             .events
@@ -74,13 +66,40 @@ pub async fn start_watching(
         let recursive_str = if rule.watch.recursive { "あり" } else { "なし" };
 
         log.info(format!(
-            "監視ルール [{}]  パス={}  パターン={}  イベント={}  サブフォルダ={}",
+            "監視ルール [{}]  パス={}  イベント={}  サブフォルダ={}",
             rule.name,
             canonical_display,
-            pattern_str,
             events_str,
             recursive_str,
         ));
+
+        // 包含ファイルフィルタ
+        if let Some(pats) = &rule.watch.patterns {
+            log.info(format!("  包含ファイル: {}", pats.join(", ")));
+        } else if let Some(re) = &rule.watch.regex {
+            log.info(format!("  包含ファイル: regex: {re}"));
+        }
+
+        // 除外ファイルフィルタ
+        if !rule.watch.exclude_patterns.is_empty() {
+            log.info(format!("  除外ファイル: {}", rule.watch.exclude_patterns.join(", ")));
+        } else if let Some(re) = &rule.watch.exclude_regex {
+            log.info(format!("  除外ファイル: regex: {re}"));
+        }
+
+        // 包含フォルダフィルタ
+        if !rule.watch.dir_patterns.is_empty() {
+            log.info(format!("  包含フォルダ: {}", rule.watch.dir_patterns.join(", ")));
+        } else if let Some(re) = &rule.watch.dir_regex {
+            log.info(format!("  包含フォルダ: regex: {re}"));
+        }
+
+        // 除外フォルダフィルタ
+        if !rule.watch.exclude_dir_patterns.is_empty() {
+            log.info(format!("  除外フォルダ: {}", rule.watch.exclude_dir_patterns.join(", ")));
+        } else if let Some(re) = &rule.watch.exclude_dir_regex {
+            log.info(format!("  除外フォルダ: regex: {re}"));
+        }
 
         watch_map
             .entry(path)

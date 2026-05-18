@@ -152,6 +152,16 @@ pub struct Watch {
     pub patterns: Option<Vec<String>>,
     pub regex: Option<String>,
     pub exclude_patterns: Vec<String>,
+    #[serde(default)]
+    pub exclude_regex: Option<String>,
+    #[serde(default)]
+    pub exclude_dir_patterns: Vec<String>,
+    #[serde(default)]
+    pub exclude_dir_regex: Option<String>,
+    #[serde(default)]
+    pub dir_patterns: Vec<String>,
+    #[serde(default)]
+    pub dir_regex: Option<String>,
     pub events: Vec<Event>,
 }
 
@@ -299,6 +309,48 @@ pub fn validate_rules_config(config: &RulesConfig) -> Result<(), AppError> {
 		for glob in &rule.watch.exclude_patterns {
 			if let Err(e) = Glob::new(glob) {
 				errors.push(format!("監視ルール名 {} の exclude_patterns に無効な glob があります '{}': {}", rule_id, glob, e));
+			}
+		}
+
+		if !rule.watch.exclude_patterns.is_empty() && rule.watch.exclude_regex.is_some() {
+			errors.push(format!("監視ルール名 {} の exclude_patterns と exclude_regex は片方のみ定義できます", rule_id));
+		}
+
+		if let Some(re_str) = &rule.watch.exclude_regex {
+			if let Err(e) = Regex::new(re_str) {
+				errors.push(format!("監視ルール名 {} の exclude_regex に無効な正規表現があります '{}': {}", rule_id, re_str, e));
+			}
+		}
+
+		if !rule.watch.exclude_dir_patterns.is_empty() && rule.watch.exclude_dir_regex.is_some() {
+			errors.push(format!("監視ルール名 {} の exclude_dir_patterns と exclude_dir_regex は片方のみ定義できます", rule_id));
+		}
+
+		for glob in &rule.watch.exclude_dir_patterns {
+			if let Err(e) = Glob::new(glob) {
+				errors.push(format!("監視ルール名 {} の exclude_dir_patterns に無効な glob があります '{}': {}", rule_id, glob, e));
+			}
+		}
+
+		if let Some(re_str) = &rule.watch.exclude_dir_regex {
+			if let Err(e) = Regex::new(re_str) {
+				errors.push(format!("監視ルール名 {} の exclude_dir_regex に無効な正規表現があります '{}': {}", rule_id, re_str, e));
+			}
+		}
+
+		if !rule.watch.dir_patterns.is_empty() && rule.watch.dir_regex.is_some() {
+			errors.push(format!("監視ルール名 {} の dir_patterns と dir_regex は片方のみ定義できます", rule_id));
+		}
+
+		for glob in &rule.watch.dir_patterns {
+			if let Err(e) = Glob::new(glob) {
+				errors.push(format!("監視ルール名 {} の dir_patterns に無効な glob があります '{}': {}", rule_id, glob, e));
+			}
+		}
+
+		if let Some(re_str) = &rule.watch.dir_regex {
+			if let Err(e) = Regex::new(re_str) {
+				errors.push(format!("監視ルール名 {} の dir_regex に無効な正規表現があります '{}': {}", rule_id, re_str, e));
 			}
 		}
 
@@ -1074,6 +1126,393 @@ mod tests {
 			include_hidden = false
 			patterns = ["*.csv"]
 			exclude_patterns = ["[bad"]
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	// =========================================================
+	// exclude_regex / exclude_dir_patterns / exclude_dir_regex (#28)
+	// =========================================================
+
+	#[test]
+	fn test_validate_exclude_patterns_and_exclude_regex_both_set() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "both-exclude"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = ["*.tmp"]
+			exclude_regex = "^debug"
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_validate_exclude_regex_only_valid() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "exclude-regex-only"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			exclude_regex = "^debug_\\d+"
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_ok());
+	}
+
+	#[test]
+	fn test_validate_invalid_exclude_regex() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "bad-exclude-regex"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			exclude_regex = "(unclosed"
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_validate_exclude_dir_patterns_and_exclude_dir_regex_both_set() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "both-dir-exclude"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			exclude_dir_patterns = ["node_modules"]
+			exclude_dir_regex = "^\\."
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_validate_exclude_dir_patterns_valid() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "dir-patterns-ok"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			exclude_dir_patterns = ["node_modules", ".git"]
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_ok());
+	}
+
+	#[test]
+	fn test_validate_invalid_exclude_dir_glob() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "bad-dir-glob"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			exclude_dir_patterns = ["[bad"]
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_validate_invalid_exclude_dir_regex() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "bad-dir-regex"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			exclude_dir_regex = "(unclosed"
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_validate_exclude_dir_regex_valid() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "dir-regex-ok"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			exclude_dir_regex = "^\\."
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_ok());
+	}
+
+	// =========================================================
+	// dir_patterns / dir_regex (#28)
+	// =========================================================
+
+	#[test]
+	fn test_validate_dir_patterns_and_dir_regex_both_set() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "both-dir-include"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			dir_patterns = ["src"]
+			dir_regex = "^reports"
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_validate_dir_patterns_valid() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "dir-patterns-include-ok"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			dir_patterns = ["src", "reports"]
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_ok());
+	}
+
+	#[test]
+	fn test_validate_invalid_dir_glob() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "bad-dir-include-glob"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			dir_patterns = ["[bad"]
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_validate_dir_regex_valid() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "dir-regex-include-ok"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			dir_regex = "^reports_\\d+"
+			events = ["create"]
+
+			[[rules.actions]]
+			type = "command"
+			shell = "cmd"
+			command = "echo hi"
+			working_dir = ""
+		"#, sanitize_path(dir.path()));
+		let config: RulesConfig = toml::from_str(&toml_str).unwrap();
+		let result = validate_rules_config(&config);
+		assert!(result.is_ok());
+	}
+
+	#[test]
+	fn test_validate_invalid_dir_regex() {
+		let dir = tempdir().unwrap();
+		let toml_str = format!(r#"
+			[[rules]]
+			enabled = true
+			name = "bad-dir-regex-include"
+
+			[rules.watch]
+			path = "{}"
+			recursive = true
+			target = "file"
+			include_hidden = false
+			patterns = ["*.csv"]
+			exclude_patterns = []
+			dir_regex = "(unclosed"
 			events = ["create"]
 
 			[[rules.actions]]
