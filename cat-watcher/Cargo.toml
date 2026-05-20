@@ -18,6 +18,9 @@ walkdir = "2"
 colored = "2"
 unicode-width = "0.2"
 
+[target.'cfg(windows)'.dependencies]
+windows-service = "0.6"
+
 [build-dependencies]
 winres = "0.1"
 

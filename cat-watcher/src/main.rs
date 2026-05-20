@@ -14,6 +14,8 @@ mod error;
 mod logger;
 mod placeholder;
 mod router;
+#[cfg(windows)]
+mod service;
 mod templates;
 mod watcher;
 
@@ -93,6 +95,11 @@ struct Args {
 }
 
 fn main() {
+    #[cfg(windows)]
+    if service::try_run_as_service() {
+        return;
+    }
+
     let args = Args::parse();
 
     if let Some(ref csv_path) = args.from_csv {
