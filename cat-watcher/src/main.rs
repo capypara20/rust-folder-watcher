@@ -95,6 +95,8 @@ struct Args {
 }
 
 fn main() {
+    // StartServiceCtrlDispatcherW は tokio ランタイム生成より先に
+    // メインスレッドから直接呼ぶ必要がある（エラー1053回避）
     #[cfg(windows)]
     if service::try_run_as_service() {
         return;
@@ -212,4 +214,3 @@ fn run_init(init_type: &InitType, output: Option<&std::path::Path>) -> Result<()
     }
     Ok(())
 }
-
