@@ -197,7 +197,8 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
     if let Some(out_path) = output {
         std::fs::write(out_path, &toml)
             .map_err(|e| AppError::Config(format!("出力ファイルの書き込みに失敗: {e}")))?;
-        println!("変換完了: {}", out_path.display());
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!("[{ts}] [INFO]    変換完了: {}", out_path.display());
     } else {
         print!("{toml}");
     }

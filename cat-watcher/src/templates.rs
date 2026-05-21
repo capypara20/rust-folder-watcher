@@ -56,5 +56,5 @@ message = "検知: {BaseName}"
 
 pub const RULES_CSV: &str = "\
 rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,message\r\n\
-ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,, create,log,,,,,,,,,, 検知: {BaseName}\r\n\
+ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,log,,,,,,,,,,検知: {BaseName}\r\n\
 ";

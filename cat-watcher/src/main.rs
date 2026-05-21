@@ -27,45 +27,64 @@ enum InitType {
     Csv,
 }
 
+/// ファイル監視・自動処理ツール
 #[derive(Parser)]
 #[command(disable_help_flag = false)]
-struct Cli {
-    #[arg(short, long)]
+struct Args {
+    /// グローバル設定ファイルのパス
+    #[arg(short, long, value_name = "FILE")]
     global: Option<PathBuf>,
-    #[arg(short, long)]
+    /// ルール設定ファイルのパス
+    #[arg(short, long, value_name = "FILE")]
     rules: Option<PathBuf>,
-    #[arg(long)]
-    log_level: Option<String>,
+    /// 設定ファイルのバリデーションのみ実行して終了
     #[arg(long)]
     validate: bool,
+    /// CSV ファイルから rules.toml を生成
     #[arg(long, value_name = "CSV")]
     from_csv: Option<PathBuf>,
+    /// 出力先ファイルパス（--from-csv または --init と組み合わせて使用）
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
-    /// テンプレートファイルを出力する (global / rules / csv)
-    #[arg(long, value_name = "TYPE")]
-    init: Option<InitType>,
+    /// テンプレートファイルを出力する（複数指定可: global rules csv）
+    #[arg(long, value_name = "TYPE", num_args = 1..)]
+    init: Vec<InitType>,
 }
 
-#[tokio::main]
-async fn main() -> Result<(), AppError> {
+fn main() {
     if std::env::args_os().len() == 1 {
         init_colors();
         print_guide();
-        return Ok(());
+        return;
     }
 
-    let cli = Cli::parse();
+    let args = Args::parse();
 
-    if let Some(ref csv_path) = cli.from_csv {
-        return csv_import::run(csv_path, cli.output.as_deref());
+    if let Some(ref csv_path) = args.from_csv {
+        exit_on_err(csv_import::run(csv_path, args.output.as_deref()));
+        return;
     }
 
-    if let Some(ref init_type) = cli.init {
-        return run_init(init_type, cli.output.as_deref());
+    if !args.init.is_empty() {
+        let mut had_error = false;
+        for init_type in &args.init {
+            if let Err(e) = run_init(init_type, args.output.as_deref()) {
+                let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+                eprintln!("{}", format!("[{ts}] [ERROR] {e}").red().bold());
+                had_error = true;
+            }
+        }
+        if had_error {
+            std::process::exit(1);
+        }
+        return;
     }
 
-    let result = run(&cli).await;
+    let result = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("tokioランタイム作成失敗")
+        .block_on(run(&args));
     match result {
         Ok(_) => std::process::exit(0),
         Err(e) => {
@@ -76,7 +95,7 @@ async fn main() -> Result<(), AppError> {
     };
 }
 
-async fn run(cli: &Cli) -> Result<(), AppError> {
+async fn run(cli: &Args) -> Result<(), AppError> {
     let global_path = cli.global.as_ref().ok_or_else(|| {
         AppError::Config("--global オプションが未指定です".to_string())
     })?;
@@ -112,6 +131,14 @@ async fn run(cli: &Cli) -> Result<(), AppError> {
     Ok(())
 }
 
+fn exit_on_err(result: Result<(), AppError>) {
+    if let Err(e) = result {
+        let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+        eprintln!("{}", format!("[{ts}] [ERROR] {e}").red().bold());
+        std::process::exit(1);
+    }
+}
+
 fn run_init(init_type: &InitType, output: Option<&std::path::Path>) -> Result<(), AppError> {
     let (content, default_name) = match init_type {
         InitType::Global => (templates::GLOBAL_TOML, "global.toml"),
@@ -127,11 +154,9 @@ fn run_init(init_type: &InitType, output: Option<&std::path::Path>) -> Result<()
     } else {
         let path = std::path::Path::new(default_name);
         if path.exists() {
-            let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-            eprintln!("{}", format!(
-                "[{ts}] [ERROR]   {default_name} が既に存在します。上書きする場合は --output で明示的にパスを指定してください"
-            ).red().bold());
-            std::process::exit(1);
+            return Err(AppError::Config(format!(
+                "{default_name} が既に存在します。上書きする場合は --output で明示的にパスを指定してください"
+            )));
         }
         std::fs::write(path, content)
             .map_err(|e| AppError::Config(format!("ファイルの書き込みに失敗: {e}")))?;
