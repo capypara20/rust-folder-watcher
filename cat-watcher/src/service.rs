@@ -27,14 +27,28 @@ define_windows_service!(ffi_service_main, service_main);
 /// SCM からの起動を試みる。サービスとして起動されていた場合は処理完了まで
 /// ブロックして true を返す。通常の CLI 起動の場合は即座に false を返す。
 pub fn try_run_as_service() -> bool {
-    service_dispatcher::start(SERVICE_NAME, ffi_service_main).is_ok()
+    match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
+        Ok(_) => true,
+        Err(ref e) if is_not_service_context(e) => false,
+        Err(e) => {
+            eprintln!("サービスディスパッチャー起動失敗: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
-fn service_main(_arguments: Vec<OsString>) {
-    let _ = run_service();
+// ERROR_FAILED_SERVICE_CONTROLLER_CONNECT (1063) = CLI から直接起動された
+fn is_not_service_context(e: &windows_service::Error) -> bool {
+    matches!(e, windows_service::Error::Winapi(ref io_err) if io_err.raw_os_error() == Some(1063))
 }
 
-fn run_service() -> Result<(), AppError> {
+fn service_main(arguments: Vec<OsString>) {
+    if let Err(e) = run_service(&arguments) {
+        eprintln!("サービス実行エラー: {e}");
+    }
+}
+
+fn run_service(arguments: &[OsString]) -> Result<(), AppError> {
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
     let stop_tx = Arc::new(Mutex::new(Some(stop_tx)));
 
@@ -54,7 +68,12 @@ fn run_service() -> Result<(), AppError> {
         }
     };
 
-    let status_handle = service_control_handler::register(SERVICE_NAME, event_handler)
+    let service_name = arguments
+        .first()
+        .and_then(|s| s.to_str())
+        .unwrap_or(SERVICE_NAME);
+
+    let status_handle = service_control_handler::register(service_name, event_handler)
         .map_err(|e| AppError::Config(format!("SCM登録失敗: {e}")))?;
 
     let result = run_watcher(&status_handle, stop_rx);
@@ -110,19 +129,18 @@ fn run_watcher(
 
         log.info("Windowsサービスとして起動しました".to_string());
 
-        tokio::select! {
-            result = watcher::start_watching(&rules_conf.rules, &service_global, Arc::clone(&log)) => {
-                result?;
-            }
+        let result = tokio::select! {
+            result = watcher::start_watching(&rules_conf.rules, &service_global, Arc::clone(&log)) => result,
             _ = stop_rx => {
                 log.info("サービス停止シグナルを受信しました".to_string());
+                Ok(())
             }
-        }
+        };
 
         log.shutdown();
         let _ = log_handle.await;
 
-        Ok::<(), AppError>(())
+        result
     })
 }
 
