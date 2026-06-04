@@ -101,6 +101,11 @@ fn main() {
     }
 
     if !args.init.is_empty() {
+        if args.init.len() > 1 && args.output.is_some() {
+            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+            eprintln!("{}", format!("[{ts}] [ERROR] --init を複数指定する場合は --output を同時に使用できません").red().bold());
+            std::process::exit(1);
+        }
         let mut had_error = false;
         for init_type in &args.init {
             if let Err(e) = run_init(init_type, args.output.as_deref()) {
