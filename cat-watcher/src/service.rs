@@ -76,7 +76,7 @@ fn run_service(arguments: &[OsString]) -> Result<(), AppError> {
     let status_handle = service_control_handler::register(service_name, event_handler)
         .map_err(|e| AppError::Config(format!("SCM登録失敗: {e}")))?;
 
-    let result = run_watcher(&status_handle, stop_rx);
+    let result = run_watcher(status_handle, stop_rx);
 
     let exit_code = if result.is_ok() { 0 } else { 1 };
     let _ = status_handle.set_service_status(ServiceStatus {
@@ -93,7 +93,7 @@ fn run_service(arguments: &[OsString]) -> Result<(), AppError> {
 }
 
 fn run_watcher(
-    status_handle: &ServiceStatusHandle,
+    status_handle: ServiceStatusHandle,
     stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), AppError> {
     let args = parse_service_args()?;
@@ -134,6 +134,15 @@ fn run_watcher(
         let result = tokio::select! {
             result = watcher::start_watching(&rules_conf.rules, &service_global, Arc::clone(&log)) => result,
             _ = stop_rx => {
+                let _ = status_handle.set_service_status(ServiceStatus {
+                    service_type: ServiceType::OWN_PROCESS,
+                    current_state: ServiceState::StopPending,
+                    controls_accepted: ServiceControlAccept::empty(),
+                    exit_code: ServiceExitCode::Win32(0),
+                    checkpoint: 0,
+                    wait_hint: Duration::from_secs(5),
+                    process_id: None,
+                });
                 log.info("サービス停止シグナルを受信しました".to_string());
                 Ok(())
             }
@@ -165,12 +174,16 @@ fn parse_service_args() -> Result<ServiceArgs, AppError> {
                 i += 1;
                 if i < args.len() {
                     global = Some(PathBuf::from(&args[i]));
+                } else {
+                    return Err(AppError::Config("--global の値が未指定です".to_string()));
                 }
             }
             Some("--rules") | Some("-r") => {
                 i += 1;
                 if i < args.len() {
                     rules = Some(PathBuf::from(&args[i]));
+                } else {
+                    return Err(AppError::Config("--rules の値が未指定です".to_string()));
                 }
             }
             _ => {}

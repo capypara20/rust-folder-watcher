@@ -129,12 +129,19 @@ fn main() {
         return;
     }
 
-    let result = tokio::runtime::Builder::new_multi_thread()
+    let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("tokioランタイム作成失敗")
-        .block_on(run(&args));
-    match result {
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+            eprintln!("{}", format!("[{ts}] [ERROR] tokioランタイム作成失敗: {e}").red().bold());
+            std::process::exit(1);
+        }
+    };
+
+    match rt.block_on(run(&args)) {
         Ok(_) => std::process::exit(0),
         Err(e) => {
             let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
