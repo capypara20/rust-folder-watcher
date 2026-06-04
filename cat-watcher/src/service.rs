@@ -102,7 +102,7 @@ fn run_watcher(
         .set_service_status(ServiceStatus {
             service_type: ServiceType::OWN_PROCESS,
             current_state: ServiceState::Running,
-            controls_accepted: ServiceControlAccept::STOP,
+            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
             exit_code: ServiceExitCode::Win32(0),
             checkpoint: 0,
             wait_hint: Duration::default(),
@@ -110,7 +110,9 @@ fn run_watcher(
         })
         .map_err(|e| AppError::Config(format!("サービス状態設定失敗: {e}")))?;
 
-    let rt = tokio::runtime::Runtime::new()
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
         .map_err(|e| AppError::Config(format!("tokioランタイム作成失敗: {e}")))?;
 
     rt.block_on(async {
@@ -151,21 +153,21 @@ struct ServiceArgs {
 
 /// SCM が binPath= で指定したコマンドラインから --global / --rules を取り出す。
 fn parse_service_args() -> Result<ServiceArgs, AppError> {
-    let args: Vec<String> = std::env::args().collect();
+    let args: Vec<OsString> = std::env::args_os().collect();
 
     let mut global = None;
     let mut rules = None;
 
     let mut i = 1;
     while i < args.len() {
-        match args[i].as_str() {
-            "--global" | "-g" => {
+        match args[i].to_str() {
+            Some("--global") | Some("-g") => {
                 i += 1;
                 if i < args.len() {
                     global = Some(PathBuf::from(&args[i]));
                 }
             }
-            "--rules" | "-r" => {
+            Some("--rules") | Some("-r") => {
                 i += 1;
                 if i < args.len() {
                     rules = Some(PathBuf::from(&args[i]));
