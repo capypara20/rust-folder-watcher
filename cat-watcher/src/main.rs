@@ -17,6 +17,44 @@ mod router;
 mod templates;
 mod watcher;
 
+const AFTER_LONG_HELP: &str = "\
+\x1b[33;1m▶ 使い方\x1b[0m
+  監視の起動:
+    cat-watcher -g global.toml -r rules.toml
+    cat-watcher -g global.toml -r rules.toml --validate
+
+  テンプレート生成（複数同時指定可）:
+    cat-watcher --init global rules        # global.toml と rules.toml を同時生成
+    cat-watcher --init global rules csv
+
+  CSV から rules.toml を生成:
+    cat-watcher --from-csv rules.csv --output rules.toml
+
+\x1b[33;1m▶ プレースホルダー\x1b[0m  \x1b[2m（rules.toml の destination / command / args などで使用可）\x1b[0m
+  \x1b[32m{FullName}\x1b[0m         ファイルのフルパス
+  \x1b[32m{Name}\x1b[0m             ファイル名（拡張子なし）
+  \x1b[32m{BaseName}\x1b[0m         ファイル名（拡張子あり）
+  \x1b[32m{Extension}\x1b[0m        拡張子
+  \x1b[32m{DirectoryName}\x1b[0m    親ディレクトリのフルパス
+  \x1b[32m{WatchPath}\x1b[0m        監視ルートパス
+  \x1b[32m{RelativePath}\x1b[0m     監視ルートからの相対パス
+  \x1b[32m{Date}\x1b[0m             検知日       例: 20240302
+  \x1b[32m{Time}\x1b[0m             検知時刻     例: 103020
+  \x1b[32m{DateTime}\x1b[0m         日時         例: 20240302_103020
+  \x1b[32m{Destination}\x1b[0m      直前のアクションの出力先（連鎖用）
+
+\x1b[33;1m▶ CSV インポート列順\x1b[0m  \x1b[2m（--from-csv）\x1b[0m
+  rule_name, enabled, watch_path, recursive, target, include_hidden,
+  patterns, regex, exclude_patterns, events,
+  action_type, destination, overwrite, preserve_structure, verify_integrity,
+  shell, command, program, args, working_dir, message,
+  exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex
+
+  複数アクションのルール: rule_name を同じにして行を追加
+  複数値フィールド（patterns / events / args 等）: | で区切る  例: create|modify
+  ※ 列22以降（exclude_regex〜）は省略可（既存 CSV との後方互換のため末尾）
+";
+
 #[derive(clap::ValueEnum, Clone)]
 enum InitType {
     /// global.toml のテンプレートを出力
@@ -29,7 +67,10 @@ enum InitType {
 
 /// ファイル監視・自動処理ツール
 #[derive(Parser)]
-#[command(disable_help_flag = false)]
+#[command(
+    arg_required_else_help = true,
+    after_long_help = AFTER_LONG_HELP,
+)]
 struct Args {
     /// グローバル設定ファイルのパス
     #[arg(short, long, value_name = "FILE")]
@@ -52,12 +93,6 @@ struct Args {
 }
 
 fn main() {
-    if std::env::args_os().len() == 1 {
-        init_colors();
-        print_guide();
-        return;
-    }
-
     let args = Args::parse();
 
     if let Some(ref csv_path) = args.from_csv {
@@ -166,99 +201,3 @@ fn run_init(init_type: &InitType, output: Option<&std::path::Path>) -> Result<()
     Ok(())
 }
 
-fn init_colors() {
-    #[cfg(windows)]
-    colored::control::set_virtual_terminal(true).ok();
-    colored::control::set_override(true);
-}
-
-fn print_guide() {
-    let sep = "━".repeat(58);
-    println!("{}", sep.bright_cyan());
-    println!("  {}  ファイル監視・自動処理ツール", "cat-watcher".bright_white().bold());
-    println!("{}", sep.bright_cyan());
-
-    println!("\n{}", "▶ 使い方".bright_yellow().bold());
-    println!("  cat-watcher.exe --global global.toml --rules rules.toml");
-    println!("  cat-watcher.exe --global global.toml --rules rules.toml --validate");
-    println!("  cat-watcher.exe --from-csv rules.csv [--output rules.toml]");
-
-    println!("\n{}", "▶ global.toml（グローバル設定）".bright_yellow().bold());
-    println!("{}", r#"
-[global]
-log_level         = "info"    # trace / debug / info / warn / error
-log_dir           = "C:\logs"
-log_file_name     = "cat-watcher_{Date}.log"  # {Date} or {DateTime}
-log_rotation      = "daily"                   # daily / never
-retry_count       = 3
-retry_interval_ms = 1000"#.trim_start_matches('\n'));
-
-    println!("\n{}", "▶ rules.toml（ルール設定）".bright_yellow().bold());
-    println!("{}", r#"
-[[rules]]
-enabled = true
-name    = "ルール名"
-
-[rules.watch]
-path             = "C:\監視フォルダ"
-recursive        = true          # サブフォルダも対象にするか
-target           = "file"        # file / directory / both
-include_hidden   = false
-patterns         = ["*.pdf", "*.docx"]  # glob（regex と排他）
-# regex          = ".*\\.pdf$"          # 正規表現（patterns と排他）
-exclude_patterns = []
-events           = ["create", "modify"] # create / modify / delete / rename
-
-[[rules.actions]]               # ─── copy ───────────────────────────
-type               = "copy"
-destination        = "D:\backup\{Date}"
-overwrite          = true
-preserve_structure = false
-verify_integrity   = true       # BLAKE3 ハッシュで整合性検証
-
-# [[rules.actions]]             # ─── move ───────────────────────────
-# type        = "move"
-# destination = "D:\archive\{Date}\{Time}"
-# overwrite   = false
-
-# [[rules.actions]]             # ─── command ────────────────────────
-# type        = "command"
-# shell       = "cmd"           # cmd / powershell / pwsh
-# command     = "echo {FullName}"
-# working_dir = ""
-
-# [[rules.actions]]             # ─── execute ────────────────────────
-# type        = "execute"
-# program     = "C:\tool\app.exe"
-# args        = ["{FullName}"]
-# working_dir = """#.trim_start_matches('\n'));
-
-    println!("\n{}", "▶ プレースホルダー一覧".bright_yellow().bold());
-    let placeholders = [
-        ("{FullName}",      "ファイルのフルパス"),
-        ("{Name}",          "ファイル名（拡張子なし）"),
-        ("{BaseName}",      "ファイル名（拡張子あり）"),
-        ("{Extension}",     "拡張子"),
-        ("{DirectoryName}", "親ディレクトリのフルパス"),
-        ("{WatchPath}",     "監視ルートパス"),
-        ("{RelativePath}",  "監視ルートからの相対パス"),
-        ("{Date}",          "検知日       例: 20240302"),
-        ("{Time}",          "検知時刻     例: 103020"),
-        ("{DateTime}",      "日時         例: 20240302_103020"),
-        ("{Destination}",   "直前のアクションの出力先（連鎖用）"),
-    ];
-    for (key, desc) in placeholders {
-        println!("  {:<18} {}", key.bright_green(), desc);
-    }
-
-    println!("\n{}", "▶ CSV インポート（--from-csv）".bright_yellow().bold());
-    println!("  CSV の列順（1行目はヘッダー行として自動スキップ）:");
-    println!("  {}", "rule_name, enabled, watch_path, recursive, target, include_hidden,".dimmed());
-    println!("  {}", "patterns, regex, exclude_patterns, events,".dimmed());
-    println!("  {}", "action_type, destination, overwrite, preserve_structure, verify_integrity,".dimmed());
-    println!("  {}", "shell, command, program, args, working_dir".dimmed());
-    println!("  複数アクションのルール: rule_name を同じにして行を追加");
-    println!("  複数値フィールド（patterns / events / args 等）: | で区切る  例: create|modify");
-
-    println!("\n{}", sep.bright_cyan());
-}

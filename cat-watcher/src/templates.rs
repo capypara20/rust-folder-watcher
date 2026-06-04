@@ -5,6 +5,10 @@ log_file_name     = "cat-watcher_{Date}.log"  # {Date} / {DateTime}
 log_rotation      = "daily"                   # daily / never
 retry_count       = 3
 retry_interval_ms = 1000
+# log_to_console       = true   # コンソールへのログ出力（デフォルト: true）
+# log_to_file          = true   # ファイルへのログ出力（デフォルト: true）
+# terminal_log_level   = "info" # コンソール専用ログレベル（省略時は log_level を使用）
+# file_log_level       = "info" # ファイル専用ログレベル（省略時は log_level を使用）
 "#;
 
 pub const RULES_TOML: &str = r#"[[rules]]
@@ -55,6 +59,6 @@ message = "検知: {BaseName}"
 "#;
 
 pub const RULES_CSV: &str = "\
-rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,message\r\n\
-ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,log,,,,,,,,,,検知: {BaseName}\r\n\
+rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,message,exclude_regex,dir_patterns,dir_regex,exclude_dir_patterns,exclude_dir_regex\r\n\
+ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,log,,,,,,,,,,検知: {BaseName},,,,,\r\n\
 ";
