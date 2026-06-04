@@ -160,14 +160,14 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
             toml.push_str(&format!("exclude_regex    = \"{}\"\n", escape_toml_str(&exclude_regex)));
         }
         if !dir_patterns.is_empty() {
-            let pats: Vec<String> = dir_patterns.split('|').map(|s| format!("\"{}\"", s.trim())).collect();
+            let pats: Vec<String> = dir_patterns.split('|').map(|s| format!("\"{}\"", escape_toml_str(s.trim()))).collect();
             toml.push_str(&format!("dir_patterns     = [{}]\n", pats.join(", ")));
         }
         if !dir_regex.is_empty() {
             toml.push_str(&format!("dir_regex        = \"{}\"\n", escape_toml_str(&dir_regex)));
         }
         if !exclude_dir_patterns.is_empty() {
-            let pats: Vec<String> = exclude_dir_patterns.split('|').map(|s| format!("\"{}\"", s.trim())).collect();
+            let pats: Vec<String> = exclude_dir_patterns.split('|').map(|s| format!("\"{}\"", escape_toml_str(s.trim()))).collect();
             toml.push_str(&format!("exclude_dir_patterns = [{}]\n", pats.join(", ")));
         }
         if !exclude_dir_regex.is_empty() {
