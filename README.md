@@ -9,7 +9,7 @@
 - **リアルタイム監視**: 指定フォルダの create / modify / delete / rename を検知
 - **対称設計フィルタ**: ファイル名・フォルダ名 × 包含・除外 × glob・regex の 2×2×2 = 8 通りのフィルタを自由に組み合わせ可能
 - **5 種類のアクション**: log / copy / move / command（シェル経由）/ execute（プロセス直接起動）
-- **クロスプラットフォームシェル**: Windows は cmd / powershell / pwsh、Linux・macOS は bash / sh / pwsh に対応
+- **クロスプラットフォームシェル**: Windows は `cmd` / `powershell` / `pwsh`、Linux・macOS は `bash` / `sh` / `pwsh` に対応
 - **アクションチェーン**: 1 ルールに複数アクションを順次実行（直前のコピー先を `{Destination}` で参照可能）
 - **プレースホルダー**: 監視ファイルのパス・名前・日時などを宛先や引数に埋め込める
 - **整合性検証**: BLAKE3 ハッシュでコピー後のファイル一致を確認
@@ -19,7 +19,6 @@
 - **ログ出力先の個別制御**: コンソール・ファイルを個別に有効/無効、ログレベルも別々に指定可能
 - **テンプレート生成**: `--init global rules csv` のように複数のテンプレートを一括で出力できる
 - **ホームディレクトリ展開**: パス設定で `~` が使用可能（`~/logs` など）
-- **ログ CSV 形式**: ファイルログを CSV 出力するので `grep` や `awk` でフィルタリングが容易
 - **全件エラー報告**: 設定ファイルに複数の問題があっても、1 回の起動で全エラーをまとめて表示
 - **大文字小文字不区別**: 設定値は `create` / `Create` / `CREATE` のいずれでも動作
 - **CSV → TOML 変換**: Excel で書いたルールを TOML に変換する `--from-csv` モード
@@ -250,50 +249,27 @@ shell, command, program, args, working_dir, message
 
 ```
 ──────────────────────────────────────────────────────────────
-[2026-05-07 10:30:20] [MATCH]  パス=C:\data\report.csv | イベント=Create|Modify | ルール=csv-backup
+[2026-05-07 10:30:20] [MATCH]   ルール=csv-backup | パス=C:\data\report.csv | Create, Modify
 [2026-05-07 10:30:20] [ACTION]  (1/3) log
 [2026-05-07 10:30:20] [INFO]    検知: report.csv
 [2026-05-07 10:30:20] [ACTION]  (2/3) copy  C:\data\report.csv → D:\backup\20260507
 [2026-05-07 10:30:20] [OK]      コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
 [2026-05-07 10:30:20] [ACTION]  (3/3) command  shell=powershell  cmd=Write-Host 'Backed up: ...'
-[2026-05-07 10:30:20] [OK]      起動
+[2026-05-07 10:30:20] [OK]      コマンド完了
 ```
 
-**ファイル出力**（CSV 形式）
+**ファイル出力**（4列固定幅フォーマット）
 
 ```
-2026-05-07 10:30:20,INFO,cat-watcher 起動
-2026-05-07 10:30:20,INFO,監視ルール [csv-backup]  パス=C:\data\incoming  サブフォルダ=あり
-2026-05-07 10:30:20,MATCH,C:\data\report.csv,Create|Modify,csv-backup
-2026-05-07 10:30:20,ACTION,1/3,log,
-2026-05-07 10:30:20,SUCCESS,1/3,検知: report.csv
-2026-05-07 10:30:20,ACTION,2/3,copy,C:\data\report.csv → D:\backup\{Date}
-2026-05-07 10:30:20,SUCCESS,2/3,コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
-2026-05-07 10:30:20,ACTION,3/3,command,shell=powershell  cmd=Write-Host 'Backed up: ...'
-2026-05-07 10:30:20,SUCCESS,3/3,起動
+2026-05-07 10:30:20 │ INFO    │                             │ cat-watcher 起動
+2026-05-07 10:30:20 │ MATCH   │ Create,Modify               │ C:\data\report.csv
+2026-05-07 10:30:20 │ ├1 log  │                             │
+2026-05-07 10:30:20 │ │   OK  │                             │ 検知: report.csv
+2026-05-07 10:30:20 │ ├2 cop  │                             │ C:\data\report.csv → D:\backup\{Date}
+2026-05-07 10:30:20 │ │   OK  │                             │ コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
+2026-05-07 10:30:20 │ └3 cmd  │                             │ shell=powershell  cmd=Write-Host 'Backed up: ...'
+2026-05-07 10:30:20 │    OK   │                             │ 起動
 ```
-
-CSV 形式なので `grep` / `awk` / Excel での集計が容易です。
-
-```bash
-# MATCH レコードのみ抽出
-grep ",MATCH," cat-watcher.log
-
-# MATCH のパス一覧（3列目）
-grep ",MATCH," cat-watcher.log | cut -d, -f3
-
-# ルール名でフィルタ（5列目）
-grep ",MATCH," cat-watcher.log | awk -F, '$5=="csv-backup"'
-```
-
-各カラムの意味：
-
-| レコード種別 | フォーマット |
-|---|---|
-| MATCH | `timestamp,MATCH,path,events,rule_name` |
-| ACTION | `timestamp,ACTION,index/total,type,detail` |
-| SUCCESS | `timestamp,SUCCESS,index/total,message` |
-| INFO / WARN / ERROR | `timestamp,LEVEL,message` |
 
 `log_to_console = false` でターミナル出力を、`log_to_file = false` でファイル出力を無効にできます。`terminal_log_level` / `file_log_level` でそれぞれのログレベルを個別に設定することもできます。
 
