@@ -63,12 +63,33 @@ fn build_shell_command(
             Ok(c)
         }
         "pwsh" => {
-            let mut c = tokio::process::Command::new("pwsh.exe");
+            #[cfg(windows)]
+            let bin = "pwsh.exe";
+            #[cfg(not(windows))]
+            let bin = "pwsh";
+            let mut c = tokio::process::Command::new(bin);
             c.args(["-NoProfile", "-Command", expanded]);
             Ok(c)
         }
+        #[cfg(not(windows))]
+        "bash" => {
+            let mut c = tokio::process::Command::new("bash");
+            c.args(["-c", expanded]);
+            Ok(c)
+        }
+        #[cfg(not(windows))]
+        "sh" => {
+            let mut c = tokio::process::Command::new("sh");
+            c.args(["-c", expanded]);
+            Ok(c)
+        }
         other => Err(AppError::Action(format!(
-            "command: 不明なシェル '{other}'。cmd / powershell / pwsh のいずれかを指定してください"
+            "command: 不明なシェル '{other}'。{} のいずれかを指定してください",
+            if cfg!(windows) {
+                "cmd / powershell / pwsh"
+            } else {
+                "bash / sh / pwsh"
+            }
         ))),
     }
 }
@@ -140,11 +161,35 @@ mod tests {
         let src = dir.path().join("a.txt");
         std::fs::write(&src, b"x").unwrap();
         let ctx = make_ctx(&src, dir.path());
-        let action = make_action("bash", "echo hi", "");
+        let action = make_action("zsh", "echo hi", "");
         let global = make_global();
         let result = execute(&action, &ctx, &global, make_logger(), (1, 1)).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("不明なシェル"));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn bash_spawns_successfully() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"x").unwrap();
+        let ctx = make_ctx(&src, dir.path());
+        let action = make_action("bash", "echo hello", "");
+        let global = make_global();
+        assert!(execute(&action, &ctx, &global, make_logger(), (1, 1)).await.is_ok());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn sh_spawns_successfully() {
+        let dir = tempdir().unwrap();
+        let src = dir.path().join("a.txt");
+        std::fs::write(&src, b"x").unwrap();
+        let ctx = make_ctx(&src, dir.path());
+        let action = make_action("sh", "echo hello", "");
+        let global = make_global();
+        assert!(execute(&action, &ctx, &global, make_logger(), (1, 1)).await.is_ok());
     }
 
     #[cfg(target_os = "windows")]
@@ -200,6 +245,6 @@ mod tests {
 
     #[test]
     fn build_shell_command_unknown() {
-        assert!(build_shell_command("bash", "echo hi").is_err());
+        assert!(build_shell_command("zsh", "echo hi").is_err());
     }
 }

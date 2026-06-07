@@ -14,6 +14,8 @@ mod error;
 mod logger;
 mod placeholder;
 mod router;
+#[cfg(windows)]
+mod service;
 mod templates;
 mod watcher;
 
@@ -93,6 +95,13 @@ struct Args {
 }
 
 fn main() {
+    // StartServiceCtrlDispatcherW は tokio ランタイム生成より先に
+    // メインスレッドから直接呼ぶ必要がある（エラー1053回避）
+    #[cfg(windows)]
+    if service::try_run_as_service() {
+        return;
+    }
+
     let args = Args::parse();
 
     if let Some(ref csv_path) = args.from_csv {
@@ -120,12 +129,19 @@ fn main() {
         return;
     }
 
-    let result = tokio::runtime::Builder::new_multi_thread()
+    let rt = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .expect("tokioランタイム作成失敗")
-        .block_on(run(&args));
-    match result {
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+            eprintln!("{}", format!("[{ts}] [ERROR] tokioランタイム作成失敗: {e}").red().bold());
+            std::process::exit(1);
+        }
+    };
+
+    match rt.block_on(run(&args)) {
         Ok(_) => std::process::exit(0),
         Err(e) => {
             let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -205,4 +221,3 @@ fn run_init(init_type: &InitType, output: Option<&std::path::Path>) -> Result<()
     }
     Ok(())
 }
-

@@ -9,6 +9,7 @@
 - **リアルタイム監視**: 指定フォルダの create / modify / delete / rename を検知
 - **対称設計フィルタ**: ファイル名・フォルダ名 × 包含・除外 × glob・regex の 2×2×2 = 8 通りのフィルタを自由に組み合わせ可能
 - **5 種類のアクション**: log / copy / move / command（シェル経由）/ execute（プロセス直接起動）
+- **クロスプラットフォームシェル**: Windows は `cmd` / `powershell` / `pwsh`、Linux・macOS は `bash` / `sh` / `pwsh` に対応
 - **アクションチェーン**: 1 ルールに複数アクションを順次実行（直前のコピー先を `{Destination}` で参照可能）
 - **プレースホルダー**: 監視ファイルのパス・名前・日時などを宛先や引数に埋め込める
 - **整合性検証**: BLAKE3 ハッシュでコピー後のファイル一致を確認
@@ -16,7 +17,8 @@
 - **ログローテーション**: 日次でログファイルを切り替え（`log_rotation = "never"` で固定ファイルにも対応）
 - **ルール別ログ**: ルールごとに独立したログファイルへ出力（`[rules.log]` セクションで設定）
 - **ログ出力先の個別制御**: コンソール・ファイルを個別に有効/無効、ログレベルも別々に指定可能
-- **テンプレート生成**: `--init` で設定ファイルのひな形をすぐに出力できる
+- **テンプレート生成**: `--init global rules csv` のように複数のテンプレートを一括で出力できる
+- **ホームディレクトリ展開**: パス設定で `~` が使用可能（`~/logs` など）
 - **全件エラー報告**: 設定ファイルに複数の問題があっても、1 回の起動で全エラーをまとめて表示
 - **大文字小文字不区別**: 設定値は `create` / `Create` / `CREATE` のいずれでも動作
 - **CSV → TOML 変換**: Excel で書いたルールを TOML に変換する `--from-csv` モード
@@ -40,11 +42,15 @@ cargo build --release --manifest-path cat-watcher/Cargo.toml
 
 ```bash
 # 設定ファイルのテンプレートを生成（まずここから）
-cat-watcher --init global
-cat-watcher --init rules
-cat-watcher --init csv
+cat-watcher --init global          # global.toml を生成
+cat-watcher --init rules           # rules.toml を生成
+cat-watcher --init csv             # rules.csv を生成
 
-# 出力先ファイルを明示する場合
+# 複数テンプレートを一括生成
+cat-watcher --init global rules
+cat-watcher --init global rules csv
+
+# 出力先ファイルを明示する場合（--init が1種類のときのみ使用可）
 cat-watcher --init global --output config\global.toml
 cat-watcher --init rules  --output config\rules.toml
 
@@ -66,7 +72,7 @@ cat-watcher --from-csv rules.csv --output rules.toml
 ```toml
 [global]
 log_level         = "info"                    # trace / debug / info / warn / error
-log_dir           = "C:\\logs"
+log_dir           = "C:\\logs"               # ~ によるホームディレクトリ展開も可（例: ~/logs）
 log_file_name     = "cat-watcher_{Date}.log"  # {Date} / {DateTime} を埋め込み可
 log_rotation      = "daily"                   # daily / never
 retry_count       = 3
@@ -89,7 +95,7 @@ enabled = true
 name    = "csv-backup"
 
 [rules.watch]
-path             = "C:\\data\\incoming"
+path             = "C:\\data\\incoming"      # ~ によるホームディレクトリ展開も可（例: ~/data）
 recursive        = true
 target           = "file"                # file / directory / both
 include_hidden   = false
@@ -125,7 +131,8 @@ verify_integrity   = true                # BLAKE3 でコピー検証
 
 [[rules.actions]]
 type        = "command"
-shell       = "powershell"               # cmd / powershell / pwsh
+shell       = "powershell"               # Windows: cmd / powershell / pwsh
+                                         # Linux・macOS: bash / sh / pwsh
 command     = "Write-Host 'Backed up: {Name} -> {Destination}'"
 working_dir = ""
 ```
@@ -183,7 +190,7 @@ exclude_dir_patterns = ["node_modules"]  # ただし node_modules は除外
 | `log`     | イベントをログファイルに記録するだけ（コマンド実行なし） | `message` |
 | `copy`    | ファイル / ディレクトリをコピー | `destination`, `overwrite`, `preserve_structure`, `verify_integrity` |
 | `move`    | ファイル / ディレクトリを移動（異ボリュームは copy + delete にフォールバック） | `destination`, `overwrite`, `preserve_structure`, `verify_integrity` |
-| `command` | シェル経由でコマンド実行 | `shell` (`cmd` / `powershell` / `pwsh`), `command`, `working_dir` |
+| `command` | シェル経由でコマンド実行 | `shell`（Windows: `cmd` / `powershell` / `pwsh`、Linux: `bash` / `sh` / `pwsh`）, `command`, `working_dir` |
 | `execute` | プログラムを直接起動 | `program`, `args`, `working_dir` |
 
 ## プレースホルダー
@@ -255,13 +262,8 @@ shell, command, program, args, working_dir, message
 
 ```
 2026-05-07 10:30:20 │ INFO    │                             │ cat-watcher 起動
-2026-05-07 10:30:20 │ INFO    │                             │ 監視ルール [csv-backup]  パス=C:\data\incoming  イベント=作成, 変更  サブフォルダ=あり
-2026-05-07 10:30:20 │ INFO    │                             │   包含ファイル: *.csv, *.xlsx
-2026-05-07 10:30:20 │ INFO    │                             │   除外ファイル: temp_*
-2026-05-07 10:30:20 │ INFO    │                             │   包含フォルダ: incoming, drop
-2026-05-07 10:30:20 │ INFO    │                             │   除外フォルダ: node_modules
 2026-05-07 10:30:20 │ MATCH   │ Create,Modify               │ C:\data\report.csv
-2026-05-07 10:30:20 │ ├1 log  │                             │ 
+2026-05-07 10:30:20 │ ├1 log  │                             │
 2026-05-07 10:30:20 │ │   OK  │                             │ 検知: report.csv
 2026-05-07 10:30:20 │ ├2 cop  │                             │ C:\data\report.csv → D:\backup\{Date}
 2026-05-07 10:30:20 │ │   OK  │                             │ コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
@@ -270,6 +272,42 @@ shell, command, program, args, working_dir, message
 ```
 
 `log_to_console = false` でターミナル出力を、`log_to_file = false` でファイル出力を無効にできます。`terminal_log_level` / `file_log_level` でそれぞれのログレベルを個別に設定することもできます。
+
+## Windows サービスとして登録する
+
+`cat-watcher.exe` は Windows サービスとして登録・常駐できます。OS 起動時に自動で監視を開始したい場合に使います。
+
+### 登録手順
+
+管理者権限のコマンドプロンプト（または PowerShell）で実行してください。
+
+```cmd
+:: サービスを登録（--global / --rules のパスは絶対パスで指定）
+sc create cat-watcher ^
+  binPath= "C:\tools\cat-watcher.exe --global C:\tools\global.toml --rules C:\tools\rules.toml" ^
+  start= auto ^
+  DisplayName= "cat-watcher"
+
+:: サービスを開始
+sc start cat-watcher
+
+:: サービスの状態を確認
+sc query cat-watcher
+```
+
+### 停止・削除
+
+```cmd
+sc stop cat-watcher
+sc delete cat-watcher
+```
+
+### 注意事項
+
+- `binPath=` の後のパスはすべて **絶対パス** で指定してください（`~` や相対パスは SCM が解釈できません）
+- サービスモードでは **コンソール出力は自動で無効** になり、ファイルログのみ出力されます
+- `global.toml` の `log_to_file = true` と `log_dir` を正しく設定しておく必要があります
+- 通常の CLI 起動（`cat-watcher -g ... -r ...`）の動作は変わりません
 
 ## 開発
 
