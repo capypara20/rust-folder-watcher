@@ -191,17 +191,39 @@ pub struct ActionConfig {
     pub message: Option<String>,
 }
 
+fn expand_tilde(s: &str) -> String {
+	if s == "~" || s.starts_with("~/") || s.starts_with("~\\") {
+		let home = std::env::var_os("HOME")
+			.or_else(|| std::env::var_os("USERPROFILE"))
+			.map(|h| h.to_string_lossy().into_owned())
+			.unwrap_or_default();
+		return format!("{}{}", home, &s[1..]);
+	}
+	s.to_string()
+}
+
 pub fn load_global_config(path: &Path) -> Result<GlobalConfig, AppError> {
 	let content = std::fs::read_to_string(path)?;
-	let config: GlobalConfig = toml::from_str(&content)
+	let mut config: GlobalConfig = toml::from_str(&content)
 							.map_err(|e| AppError::TomlParse(e.to_string()))?;
+	config.global.log_dir = expand_tilde(&config.global.log_dir);
 	Ok(config)
 }
 
 pub fn load_rules_config(path: &Path) -> Result<RulesConfig, AppError> {
 	let content = std::fs::read_to_string(path)?;
-	let config: RulesConfig = toml::from_str(&content)
+	let mut config: RulesConfig = toml::from_str(&content)
 							.map_err(|e| AppError::TomlParse(e.to_string()))?;
+	for rule in &mut config.rules {
+		rule.watch.path = expand_tilde(&rule.watch.path);
+		for action in &mut rule.actions {
+			action.destination = action.destination.as_deref().map(expand_tilde);
+			action.working_dir = action.working_dir.as_deref().map(expand_tilde);
+		}
+		if let Some(log) = &mut rule.log {
+			log.log_dir = log.log_dir.as_deref().map(expand_tilde);
+		}
+	}
 	Ok(config)
 }
 
