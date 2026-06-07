@@ -25,6 +25,12 @@ const COL_PROGRAM: usize = 17;
 const COL_ARGS: usize = 18;
 const COL_WORKING_DIR: usize = 19;
 const COL_MESSAGE: usize = 20;
+// 列21以降は後から追加されたフィルター列（既存CSVとの後方互換のため末尾に追加）
+const COL_EXCLUDE_REGEX: usize = 21;
+const COL_DIR_PATTERNS: usize = 22;
+const COL_DIR_REGEX: usize = 23;
+const COL_EXCLUDE_DIR_PATTERNS: usize = 24;
+const COL_EXCLUDE_DIR_REGEX: usize = 25;
 
 pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
     let content = std::fs::read_to_string(csv_path)
@@ -82,6 +88,11 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
         let patterns = get(first, COL_PATTERNS);
         let regex = get(first, COL_REGEX);
         let exclude_patterns = get(first, COL_EXCLUDE_PATTERNS);
+        let exclude_regex = get(first, COL_EXCLUDE_REGEX);
+        let dir_patterns = get(first, COL_DIR_PATTERNS);
+        let dir_regex = get(first, COL_DIR_REGEX);
+        let exclude_dir_patterns = get(first, COL_EXCLUDE_DIR_PATTERNS);
+        let exclude_dir_regex = get(first, COL_EXCLUDE_DIR_REGEX);
         let events = get(first, COL_EVENTS);
 
         if watch_path.is_empty() {
@@ -102,6 +113,21 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
         if !patterns.is_empty() && !regex.is_empty() {
             return Err(AppError::Config(format!(
                 "ルール '{rule_name}' の patterns と regex は同時指定できません"
+            )));
+        }
+        if !exclude_patterns.is_empty() && !exclude_regex.is_empty() {
+            return Err(AppError::Config(format!(
+                "ルール '{rule_name}' の exclude_patterns と exclude_regex は同時指定できません"
+            )));
+        }
+        if !dir_patterns.is_empty() && !dir_regex.is_empty() {
+            return Err(AppError::Config(format!(
+                "ルール '{rule_name}' の dir_patterns と dir_regex は同時指定できません"
+            )));
+        }
+        if !exclude_dir_patterns.is_empty() && !exclude_dir_regex.is_empty() {
+            return Err(AppError::Config(format!(
+                "ルール '{rule_name}' の exclude_dir_patterns と exclude_dir_regex は同時指定できません"
             )));
         }
 
@@ -129,6 +155,24 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
             exclude_patterns.split('|').map(|s| format!("\"{}\"", s.trim())).collect()
         };
         toml.push_str(&format!("exclude_patterns = [{}]\n", excl.join(", ")));
+
+        if !exclude_regex.is_empty() {
+            toml.push_str(&format!("exclude_regex    = \"{}\"\n", escape_toml_str(&exclude_regex)));
+        }
+        if !dir_patterns.is_empty() {
+            let pats: Vec<String> = dir_patterns.split('|').map(|s| format!("\"{}\"", escape_toml_str(s.trim()))).collect();
+            toml.push_str(&format!("dir_patterns     = [{}]\n", pats.join(", ")));
+        }
+        if !dir_regex.is_empty() {
+            toml.push_str(&format!("dir_regex        = \"{}\"\n", escape_toml_str(&dir_regex)));
+        }
+        if !exclude_dir_patterns.is_empty() {
+            let pats: Vec<String> = exclude_dir_patterns.split('|').map(|s| format!("\"{}\"", escape_toml_str(s.trim()))).collect();
+            toml.push_str(&format!("exclude_dir_patterns = [{}]\n", pats.join(", ")));
+        }
+        if !exclude_dir_regex.is_empty() {
+            toml.push_str(&format!("exclude_dir_regex = \"{}\"\n", escape_toml_str(&exclude_dir_regex)));
+        }
 
         let evts: Vec<String> = events.split('|').map(|s| format!("\"{}\"", s.trim())).collect();
         toml.push_str(&format!("events           = [{}]\n", evts.join(", ")));
@@ -197,7 +241,8 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
     if let Some(out_path) = output {
         std::fs::write(out_path, &toml)
             .map_err(|e| AppError::Config(format!("出力ファイルの書き込みに失敗: {e}")))?;
-        println!("変換完了: {}", out_path.display());
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!("[{ts}] [INFO]    変換完了: {}", out_path.display());
     } else {
         print!("{toml}");
     }
