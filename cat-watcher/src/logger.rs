@@ -13,14 +13,12 @@ use unicode_width::UnicodeWidthStr;
 
 const SEPARATOR: &str = "──────────────────────────────────────────────────────────────";
 
-const FILE_LEVEL_WIDTH: usize = 7;
-const FILE_EVENTS_WIDTH: usize = 27;
-
 /// 表示列幅 (East Asian Width, CJK モード) で左寄せパディングする。
 /// Rust 標準の `format!("{:<width$}")` は char 数で揃えるため、
 /// '└' '│' '├' '─' などの罫線記号で表示時に列幅がズレる。
 /// 本プロジェクトは日本語ロケール (CJK) を主用途とするため、
 /// East Asian Ambiguous 文字を 2 列幅として扱う `width_cjk()` を使う。
+#[allow(dead_code)]
 fn pad_left_display(s: &str, total_cols: usize) -> String {
     let w = UnicodeWidthStr::width_cjk(s);
     if w >= total_cols {
@@ -196,79 +194,28 @@ async fn open_log_file(path: &PathBuf) -> Option<tokio::fs::File> {
     }
 }
 
-/// アクション種別を最大4文字の短縮名に変換する。
-fn action_type_short(action_type: &str) -> &str {
-    match action_type {
-        "copy" => "copy",
-        "move" => "move",
-        "command" => "cmd",
-        "execute" => "exec",
-        "log" => "log",
-        other => {
-            if other.len() <= 4 { other } else { &other[..4] }
-        }
-    }
-}
-
-/// ファイルログ用 level カラム文字列（FILE_LEVEL_WIDTH **列** 幅）を生成する。
-/// 全角記号 ('└' '├' '│') を含むため、char 数ではなく表示列幅でパディングする。
-fn file_level_col(entry: &LogEntry) -> String {
+/// ファイルログ用 CSV 1行を生成する。
+/// フォーマット:
+///   MATCH:     timestamp,MATCH,path,events,rule_name
+///   ACTION:    timestamp,ACTION,index/total,type,detail
+///   SUCCESS:   timestamp,SUCCESS,msg
+///   INFO/WARN/ERROR: timestamp,LEVEL,msg
+fn format_csv_line(ts: &str, entry: &LogEntry) -> String {
     match entry {
-        LogEntry::Match { .. } => pad_left_display("MATCH", FILE_LEVEL_WIDTH),
-        LogEntry::Action { index, total, action_type, .. } => {
-            let tree = if *index == *total { '└' } else { '├' };
-            let short = action_type_short(action_type);
-            let index_str = index.to_string();
-            // tree ('└'/'├' は CJK で 列幅 2) + index + space(1) + type で
-            // FILE_LEVEL_WIDTH 列に収める。type も CJK 列幅基準で切り詰める。
-            let used_cols = 2 + index_str.len() + 1;
-            let type_max_cols = FILE_LEVEL_WIDTH.saturating_sub(used_cols);
-            let mut type_part = String::new();
-            let mut used = 0usize;
-            for c in short.chars() {
-                let cw = UnicodeWidthStr::width_cjk(c.to_string().as_str());
-                if used + cw > type_max_cols { break; }
-                type_part.push(c);
-                used += cw;
-            }
-            let head = format!("{}{} {}", tree, index_str, type_part);
-            pad_left_display(&head, FILE_LEVEL_WIDTH)
+        LogEntry::Match { rule_name, path, events } => {
+            let ev = format_events(events);
+            format!("{ts},MATCH,{path},{ev},{rule_name}\n")
         }
-        LogEntry::ActionOk { index, total, .. } => {
-            if *index == *total {
-                // 最終ステップ完了: 継続パイプなし
-                pad_left_display("   OK", FILE_LEVEL_WIDTH)
-            } else {
-                // 中間ステップ完了: 継続パイプあり ('│' は列幅 2)
-                pad_left_display("│   OK", FILE_LEVEL_WIDTH)
-            }
+        LogEntry::Action { index, total, action_type, detail } => {
+            let detail = detail.replace('\n', r"\n");
+            format!("{ts},ACTION,{index}/{total},{action_type},{detail}\n")
         }
-        LogEntry::Info(_) => pad_left_display("INFO", FILE_LEVEL_WIDTH),
-        LogEntry::Warn(_) => pad_left_display("WARN", FILE_LEVEL_WIDTH),
-        LogEntry::Error(_) => pad_left_display("ERROR", FILE_LEVEL_WIDTH),
-        LogEntry::Shutdown => unreachable!(),
-    }
-}
-
-/// ファイルログ用 events カラム文字列（FILE_EVENTS_WIDTH **列** 幅）を生成する。
-/// MATCH エントリのみイベント名を出力し、それ以外は空白で埋める。
-fn file_events_col(entry: &LogEntry) -> String {
-    let s = match entry {
-        LogEntry::Match { events, .. } => format_events(events),
-        _ => String::new(),
-    };
-    pad_left_display(&s, FILE_EVENTS_WIDTH)
-}
-
-/// ファイルログ用 content カラムを生成する。
-fn file_content(entry: &LogEntry) -> String {
-    match entry {
-        LogEntry::Match { path, .. } => path.clone(),
-        LogEntry::Action { detail, .. } => detail.replace('\n', r"\n"),
-        LogEntry::ActionOk { msg, .. } => msg.clone(),
-        LogEntry::Info(msg) => msg.clone(),
-        LogEntry::Warn(msg) => msg.clone(),
-        LogEntry::Error(msg) => msg.clone(),
+        LogEntry::ActionOk { index, total, msg } => {
+            format!("{ts},SUCCESS,{index}/{total},{msg}\n")
+        }
+        LogEntry::Info(msg) => format!("{ts},INFO,{msg}\n"),
+        LogEntry::Warn(msg) => format!("{ts},WARN,{msg}\n"),
+        LogEntry::Error(msg) => format!("{ts},ERROR,{msg}\n"),
         LogEntry::Shutdown => unreachable!(),
     }
 }
@@ -306,25 +253,10 @@ async fn writer_task(
 
         let ts = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        // ─── ファイルログ（4カラム固定幅フォーマット）───────────────────────
-        if log_to_file {
-            let file_line = match &entry {
-                LogEntry::Match { .. } | LogEntry::Action { .. } | LogEntry::ActionOk { .. }
-                | LogEntry::Info(_) | LogEntry::Warn(_) | LogEntry::Error(_) => {
-                    if !level_enabled_for_entry(&file_level, &entry) {
-                        String::new()
-                    } else {
-                        let lv = file_level_col(&entry);
-                        let ev = file_events_col(&entry);
-                        let ct = file_content(&entry);
-                        format!("{} │ {} │ {} │ {}\n", ts, lv, ev, ct)
-                    }
-                }
-                LogEntry::Shutdown => unreachable!(),
-            };
-            if !file_line.is_empty() {
-                write_file(&mut file, &file_line).await;
-            }
+        // ─── ファイルログ（CSV形式）────────────────────────────────────────
+        if log_to_file && level_enabled_for_entry(&file_level, &entry) {
+            let file_line = format_csv_line(&ts, &entry);
+            write_file(&mut file, &file_line).await;
         }
 
         // ─── ターミナル出力（カラー付き従来フォーマット）─────────────────────
@@ -337,7 +269,7 @@ async fn writer_task(
                         "{}\n{} {}",
                         SEPARATOR.bright_green().dimmed(),
                         format!("[{ts}] [MATCH]").bright_green().bold(),
-                        format!("  ルール={rule_name} | パス={path} | {event_str}")
+                        format!("  パス={path} | イベント={event_str} | ルール={rule_name}")
                     );
                     println!("{}", term_line);
                 }
@@ -445,7 +377,7 @@ fn format_events(events: &HashSet<crate::config::Event>) -> String {
         })
         .collect();
     names.sort();
-    names.join(",")
+    names.join("|")
 }
 
 #[cfg(test)]
@@ -483,14 +415,15 @@ mod tests {
         assert_eq!(s, "VERYLONGTEXT");
     }
 
-    /// 罫線なしのレベル文字列が CJK 列幅 7 列で揃う
+    /// pad_left_display で同じ幅に揃えられることを確認
     #[test]
     fn test_pad_left_display_info_aligns_with_match() {
-        let info = pad_left_display("INFO", FILE_LEVEL_WIDTH);
-        let match_ = pad_left_display("MATCH", FILE_LEVEL_WIDTH);
-        let action_ok = pad_left_display("│   OK", FILE_LEVEL_WIDTH);
-        assert_eq!(UnicodeWidthStr::width_cjk(info.as_str()), FILE_LEVEL_WIDTH);
-        assert_eq!(UnicodeWidthStr::width_cjk(match_.as_str()), FILE_LEVEL_WIDTH);
-        assert_eq!(UnicodeWidthStr::width_cjk(action_ok.as_str()), FILE_LEVEL_WIDTH);
+        let width = 7;
+        let info = pad_left_display("INFO", width);
+        let match_ = pad_left_display("MATCH", width);
+        let action_ok = pad_left_display("│   OK", width);
+        assert_eq!(UnicodeWidthStr::width_cjk(info.as_str()), width);
+        assert_eq!(UnicodeWidthStr::width_cjk(match_.as_str()), width);
+        assert_eq!(UnicodeWidthStr::width_cjk(action_ok.as_str()), width);
     }
 }
