@@ -1,14 +1,18 @@
-pub const GLOBAL_TOML: &str = r#"[global]
-log_level         = "info"    # trace / debug / info / warn / error
-log_dir           = "C:\logs"
-log_file_name     = "cat-watcher_{Date}.log"  # {Date} / {DateTime}
-log_rotation      = "daily"                   # daily / never
-retry_count       = 3
-retry_interval_ms = 1000
-# log_to_console       = true   # コンソールへのログ出力（デフォルト: true）
-# log_to_file          = true   # ファイルへのログ出力（デフォルト: true）
-# terminal_log_level   = "info" # コンソール専用ログレベル（省略時は log_level を使用）
-# file_log_level       = "info" # ファイル専用ログレベル（省略時は log_level を使用）
+pub const GLOBAL_TOML: &str = r#"# ─── リトライ設定（copy / move 失敗時の再試行）─────────────────────────
+[retry]
+count       = 3       # 再試行回数
+interval_ms = 1000    # 再試行間隔（ミリ秒）
+
+# ─── システムログ（プログラム全体の起動日誌・全体で1本）───────────────
+# 起動バナー / ルール一覧 / 監視開始 / 終了 と、システム階層のエラーを記録。
+# 検知・アクションの結果はルール別ログ（rules.toml の [rules.log]）に出ます。
+[system_log]
+enabled   = true
+dir       = "C:\logs"
+file_name = "system_{Date}.log"   # {Date} / {DateTime}
+rotation  = "daily"               # daily / never
+level     = "info"                # trace / debug / info / warn / error
+console   = true                  # コンソールへの出力 ON/OFF
 "#;
 
 pub const RULES_TOML: &str = r#"[[rules]]
@@ -24,6 +28,23 @@ patterns         = ["*"]           # glob（regex と排他）
 # regex          = ".*\\.csv$"     # 正規表現（patterns と排他）
 exclude_patterns = []
 events           = ["create"]      # create / modify / delete / rename
+
+# ─── ルール別ログ（検知ログ・アクションログ）────────────────────────────
+# detect: 検知イベントだけを記録（timestamp │ events │ 検知パス）
+# action: 検知ごとのアクション実行内容をブロック形式で記録
+# どちらも enabled で個別に ON/OFF できます。
+
+[rules.log.detect]
+enabled   = true
+dir       = "C:\logs"
+file_name = "detect_ルール名_{Date}.log"
+rotation  = "daily"
+
+[rules.log.action]
+enabled   = true
+dir       = "C:\logs"
+file_name = "action_ルール名_{Date}.log"
+rotation  = "daily"
 
 # ─── アクション例（使うものだけコメント解除してください） ────────────────
 

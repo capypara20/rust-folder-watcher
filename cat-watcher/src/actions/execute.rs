@@ -1,17 +1,15 @@
-use std::sync::Arc;
-
 use std::process::Stdio;
 
-use crate::config::{ActionConfig, Global};
+use crate::config::ActionConfig;
 use crate::error::AppError;
-use crate::logger::Logger;
 use crate::placeholder::{expand_placeholders, PlaceholderContext};
+
+use super::ActionSink;
 
 pub async fn execute(
     action: &ActionConfig,
     ctx: &PlaceholderContext,
-    _global: &Global,
-    log: Arc<Logger>,
+    sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<(), AppError> {
     let program = action
@@ -49,31 +47,17 @@ pub async fn execute(
         ))
     })?;
 
-    log.log_action_ok(step.0, step.1, "起動");
+    sink.ok(step.0, step.1, "起動".to_string());
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{ActionType, Global, LogLevel, LogRotation};
+    use crate::config::{ActionType, LogRotation};
+    use crate::logger::Logger;
+    use std::sync::Arc;
     use tempfile::tempdir;
-
-    fn make_global() -> Global {
-        let dir = tempdir().unwrap();
-        Global {
-            log_level: LogLevel::Info,
-            log_dir: dir.path().to_str().unwrap().to_string(),
-            log_file_name: "test.log".to_string(),
-            log_rotation: LogRotation::Never,
-            retry_count: 0,
-            retry_interval_ms: 0,
-            log_to_console: false,
-            log_to_file: false,
-            terminal_log_level: None,
-            file_log_level: None,
-        }
-    }
 
     fn make_action(program: &str, args: Vec<&str>, working_dir: &str) -> ActionConfig {
         ActionConfig {
@@ -95,23 +79,16 @@ mod tests {
         PlaceholderContext::new(src, watch, "")
     }
 
-    fn make_logger() -> Arc<Logger> {
+    fn make_sink() -> ActionSink {
         let dir = tempdir().unwrap();
-        let global = Global {
-            log_level: LogLevel::Info,
-            log_dir: dir.path().to_str().unwrap().to_string(),
-            log_file_name: "test.log".to_string(),
-            log_rotation: LogRotation::Never,
-            retry_count: 0,
-            retry_interval_ms: 0,
-            log_to_console: false,
-            log_to_file: false,
-            terminal_log_level: None,
-            file_log_level: None,
-        };
+        let (logger, _) = Logger::for_action(
+            dir.path().to_str().unwrap().to_string(),
+            "test.log".to_string(),
+            LogRotation::Never,
+        )
+        .unwrap();
         std::mem::forget(dir);
-        let (logger, _) = Logger::new(&global).unwrap();
-        Arc::new(logger)
+        ActionSink::new(Arc::new(logger), None)
     }
 
     #[cfg(target_os = "windows")]
@@ -122,8 +99,7 @@ mod tests {
         std::fs::write(&src, b"x").unwrap();
         let ctx = make_ctx(&src, dir.path());
         let action = make_action("cmd.exe", vec!["/C", "echo hello"], "");
-        let global = make_global();
-        assert!(execute(&action, &ctx, &global, make_logger(), (1, 1)).await.is_ok());
+        assert!(execute(&action, &ctx, &make_sink(), (1, 1)).await.is_ok());
     }
 
     #[cfg(target_os = "windows")]
@@ -134,8 +110,7 @@ mod tests {
         std::fs::write(&src, b"x").unwrap();
         let ctx = make_ctx(&src, dir.path());
         let action = make_action("cmd.exe", vec!["/C", "echo {FullName}"], "");
-        let global = make_global();
-        assert!(execute(&action, &ctx, &global, make_logger(), (1, 1)).await.is_ok());
+        assert!(execute(&action, &ctx, &make_sink(), (1, 1)).await.is_ok());
     }
 
     #[cfg(target_os = "windows")]
@@ -146,8 +121,7 @@ mod tests {
         std::fs::write(&src, b"x").unwrap();
         let ctx = make_ctx(&src, dir.path());
         let action = make_action("cmd.exe", vec!["/C", "echo hi"], dir.path().to_str().unwrap());
-        let global = make_global();
-        assert!(execute(&action, &ctx, &global, make_logger(), (1, 1)).await.is_ok());
+        assert!(execute(&action, &ctx, &make_sink(), (1, 1)).await.is_ok());
     }
 
     #[tokio::test]
@@ -157,8 +131,7 @@ mod tests {
         std::fs::write(&src, b"x").unwrap();
         let ctx = make_ctx(&src, dir.path());
         let action = make_action("nonexistent_program_xyz.exe", vec![], "");
-        let global = make_global();
-        let result = execute(&action, &ctx, &global, make_logger(), (1, 1)).await;
+        let result = execute(&action, &ctx, &make_sink(), (1, 1)).await;
         assert!(result.is_err());
     }
 }

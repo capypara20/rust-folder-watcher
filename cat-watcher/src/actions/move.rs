@@ -1,16 +1,15 @@
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
-use crate::config::{ActionConfig, Global};
+use crate::config::{ActionConfig, RetryConfig};
 use crate::error::AppError;
-use crate::logger::Logger;
 use crate::placeholder::PlaceholderContext;
 
 use super::common::{
     expand_action_destination, resolve_dest_path, try_copy_once, walk_files,
 };
+use super::ActionSink;
 
 /// move アクションのエントリポイント。
 /// 戻り値:
@@ -21,8 +20,8 @@ pub async fn execute(
     action: &ActionConfig,
     src: &Path,
     ctx: &PlaceholderContext,
-    global: &Global,
-    log: Arc<Logger>,
+    retry: &RetryConfig,
+    sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
     let dest_root = expand_action_destination(action, ctx)?;
@@ -40,14 +39,14 @@ pub async fn execute(
             overwrite,
             preserve_structure,
             verify_integrity,
-            global,
-            log,
+            retry,
+            sink,
             step,
         )
         .await
     } else {
         let dest_file = resolve_dest_path(src, &dest_root, watch_path, preserve_structure)?;
-        move_one_file(src, &dest_file, overwrite, verify_integrity, global, log, step).await
+        move_one_file(src, &dest_file, overwrite, verify_integrity, retry, sink, step).await
     }
 }
 
@@ -57,12 +56,12 @@ async fn move_one_file(
     dest: &Path,
     overwrite: bool,
     verify_integrity: bool,
-    global: &Global,
-    log: Arc<Logger>,
+    retry: &RetryConfig,
+    sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
     if dest.exists() && !overwrite {
-        log.warn(format!(
+        sink.warn(step.0, step.1, format!(
             "move スキップ (overwrite=false で既存): {}",
             dest.display()
         ));
@@ -82,11 +81,11 @@ async fn move_one_file(
     // まず rename を試みる（同一ボリューム）
     match tokio::fs::rename(src, dest).await {
         Ok(()) => {
-            log.log_action_ok(step.0, step.1, format!("移動完了 (rename): {} → {}", src.display(), dest.display()));
+            sink.ok(step.0, step.1, format!("移動完了 (rename): {} → {}", src.display(), dest.display()));
             return Ok(Some(dest.to_path_buf()));
         }
         Err(e) if is_cross_device(&e) => {
-            log.info(format!(
+            sink.note(step.0, step.1, format!(
                 "異ボリューム検出: copy フォールバックで移動します {} → {}",
                 src.display(),
                 dest.display()
@@ -102,8 +101,8 @@ async fn move_one_file(
     }
 
     // cross-device フォールバック: コピー + 元ファイル削除（リトライあり）
-    let max_attempts = global.retry_count.saturating_add(1);
-    let interval = Duration::from_millis(global.retry_interval_ms);
+    let max_attempts = retry.count.saturating_add(1);
+    let interval = Duration::from_millis(retry.interval_ms);
 
     for attempt in 1..=max_attempts {
         match try_copy_once(src, dest, verify_integrity).await {
@@ -118,7 +117,7 @@ async fn move_one_file(
                 let hash_suffix = maybe_hash
                     .map(|h| format!("  [BLAKE3: {h}]"))
                     .unwrap_or_default();
-                log.log_action_ok(step.0, step.1, format!(
+                sink.ok(step.0, step.1, format!(
                     "移動完了 (copy+delete): {} → {}{}",
                     src.display(),
                     dest.display(),
@@ -129,17 +128,16 @@ async fn move_one_file(
             Err(e) => {
                 let _ = tokio::fs::remove_file(dest).await;
                 if attempt < max_attempts {
-                    log.warn(format!(
+                    sink.warn(step.0, step.1, format!(
                         "move 失敗 ({}回目/{}回): {} → {}: {} (再試行)",
                         attempt, max_attempts, src.display(), dest.display(), e
                     ));
                     tokio::time::sleep(interval).await;
                 } else {
-                    log.error(format!(
+                    return Err(AppError::Action(format!(
                         "move 最終失敗 ({}回試行): {} → {}: {}",
                         max_attempts, src.display(), dest.display(), e
-                    ));
-                    return Err(e);
+                    )));
                 }
             }
         }
@@ -148,6 +146,7 @@ async fn move_one_file(
 }
 
 /// ディレクトリ再帰移動。配下ファイルを 1 つずつ move_one_file に流し、最後に空ディレクトリを削除する。
+#[allow(clippy::too_many_arguments)]
 async fn move_directory_recursive(
     src_dir: &Path,
     dest_root: &Path,
@@ -155,8 +154,8 @@ async fn move_directory_recursive(
     overwrite: bool,
     preserve_structure: bool,
     verify_integrity: bool,
-    global: &Global,
-    log: Arc<Logger>,
+    retry: &RetryConfig,
+    sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
     let folder_dest = if preserve_structure {
@@ -186,7 +185,7 @@ async fn move_directory_recursive(
             .strip_prefix(src_dir)
             .map_err(|e| AppError::Action(format!("配下相対パス解決失敗: {}", e)))?;
         let entry_dest = folder_dest.join(rel);
-        move_one_file(entry, &entry_dest, overwrite, verify_integrity, global, Arc::clone(&log), step).await?;
+        move_one_file(entry, &entry_dest, overwrite, verify_integrity, retry, sink, step).await?;
     }
 
     tokio::fs::remove_dir_all(src_dir).await.map_err(|e| {
@@ -224,24 +223,14 @@ fn windows_is_cross_device(_e: &std::io::Error) -> bool {
 mod tests {
     use super::*;
     use super::super::common::hash_file_blake3;
-    use crate::config::{ActionType, Global, LogLevel, LogRotation};
+    use crate::config::{ActionType, LogRotation};
+    use crate::logger::Logger;
     use std::io::Write;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
-    fn make_global(retry_count: u32) -> Global {
-        let dir = tempdir().unwrap();
-        Global {
-            log_level: LogLevel::Info,
-            log_dir: dir.path().to_str().unwrap().to_string(),
-            log_file_name: "test.log".to_string(),
-            log_rotation: LogRotation::Never,
-            retry_count,
-            retry_interval_ms: 10,
-            log_to_console: false,
-            log_to_file: false,
-            terminal_log_level: None,
-            file_log_level: None,
-        }
+    fn make_retry(count: u32) -> RetryConfig {
+        RetryConfig { count, interval_ms: 10 }
     }
 
     fn make_move_action(
@@ -272,23 +261,16 @@ mod tests {
         std::fs::File::create(path).unwrap().write_all(body).unwrap();
     }
 
-    fn make_logger() -> Arc<Logger> {
+    fn make_sink() -> ActionSink {
         let dir = tempdir().unwrap();
-        let global = Global {
-            log_level: LogLevel::Info,
-            log_dir: dir.path().to_str().unwrap().to_string(),
-            log_file_name: "test.log".to_string(),
-            log_rotation: LogRotation::Never,
-            retry_count: 0,
-            retry_interval_ms: 0,
-            log_to_console: false,
-            log_to_file: false,
-            terminal_log_level: None,
-            file_log_level: None,
-        };
+        let (logger, _) = Logger::for_action(
+            dir.path().to_str().unwrap().to_string(),
+            "test.log".to_string(),
+            LogRotation::Never,
+        )
+        .unwrap();
         std::mem::forget(dir);
-        let (logger, _) = Logger::new(&global).unwrap();
-        Arc::new(logger)
+        ActionSink::new(Arc::new(logger), None)
     }
 
     #[tokio::test]
@@ -299,10 +281,10 @@ mod tests {
         write_file(&src, b"hello");
 
         let action = make_move_action(dest.path().to_str().unwrap(), false, false, false);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
-        let result = execute(&action, &src, &ctx, &global, make_logger(), (1, 1)).await.unwrap();
+        let result = execute(&action, &src, &ctx, &retry, &make_sink(), (1, 1)).await.unwrap();
         assert_eq!(result, Some(dest.path().join("a.txt")));
         assert!(dest.path().join("a.txt").exists());
         assert!(!src.exists(), "元ファイルが残っている");
@@ -317,10 +299,10 @@ mod tests {
         write_file(&dest.path().join("a.txt"), b"old");
 
         let action = make_move_action(dest.path().to_str().unwrap(), false, false, false);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
-        let result = execute(&action, &src, &ctx, &global, make_logger(), (1, 1)).await.unwrap();
+        let result = execute(&action, &src, &ctx, &retry, &make_sink(), (1, 1)).await.unwrap();
         assert_eq!(result, None);
         assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"old");
         assert!(src.exists(), "スキップ時は元ファイルを保持");
@@ -335,10 +317,10 @@ mod tests {
         write_file(&dest.path().join("a.txt"), b"old");
 
         let action = make_move_action(dest.path().to_str().unwrap(), true, false, false);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
-        execute(&action, &src, &ctx, &global, make_logger(), (1, 1)).await.unwrap();
+        execute(&action, &src, &ctx, &retry, &make_sink(), (1, 1)).await.unwrap();
         assert_eq!(std::fs::read(dest.path().join("a.txt")).unwrap(), b"new");
         assert!(!src.exists());
     }
@@ -351,10 +333,10 @@ mod tests {
         write_file(&src, b"hello");
 
         let action = make_move_action(dest.path().to_str().unwrap(), false, true, false);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
-        execute(&action, &src, &ctx, &global, make_logger(), (1, 1)).await.unwrap();
+        execute(&action, &src, &ctx, &retry, &make_sink(), (1, 1)).await.unwrap();
         assert!(dest.path().join("sub/deep/a.txt").exists());
         assert!(!src.exists());
     }
@@ -368,10 +350,10 @@ mod tests {
         write_file(&src_dir.join("sub/b.txt"), b"b");
 
         let action = make_move_action(dest.path().to_str().unwrap(), false, false, false);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src_dir, watch.path(), "");
 
-        let result = execute(&action, &src_dir, &ctx, &global, make_logger(), (1, 1)).await.unwrap();
+        let result = execute(&action, &src_dir, &ctx, &retry, &make_sink(), (1, 1)).await.unwrap();
         assert_eq!(result, Some(dest.path().join("mydir")));
         assert!(dest.path().join("mydir/a.txt").exists());
         assert!(dest.path().join("mydir/sub/b.txt").exists());
@@ -386,10 +368,10 @@ mod tests {
         write_file(&src, b"payload for hash");
 
         let action = make_move_action(dest.path().to_str().unwrap(), false, false, true);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
-        let result = execute(&action, &src, &ctx, &global, make_logger(), (1, 1)).await.unwrap();
+        let result = execute(&action, &src, &ctx, &retry, &make_sink(), (1, 1)).await.unwrap();
         assert!(result.is_some());
         assert!(!src.exists());
     }
@@ -406,10 +388,10 @@ mod tests {
             dest_root.path().to_str().unwrap()
         );
         let action = make_move_action(&dest_template, false, false, false);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
-        let result = execute(&action, &src, &ctx, &global, make_logger(), (1, 1)).await.unwrap();
+        let result = execute(&action, &src, &ctx, &retry, &make_sink(), (1, 1)).await.unwrap();
         let dest_path = result.expect("移動成功");
         assert!(dest_path.exists());
         assert_eq!(dest_path.file_name().unwrap(), "a.txt");
@@ -423,10 +405,10 @@ mod tests {
         let src = watch.path().join("nonexistent.txt");
 
         let action = make_move_action(dest.path().to_str().unwrap(), false, false, false);
-        let global = make_global(0);
+        let retry = make_retry(0);
         let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
-        let result = execute(&action, &src, &ctx, &global, make_logger(), (1, 1)).await;
+        let result = execute(&action, &src, &ctx, &retry, &make_sink(), (1, 1)).await;
         assert!(result.is_err(), "存在しないファイルの move はエラー");
     }
 

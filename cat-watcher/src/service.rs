@@ -122,17 +122,14 @@ fn run_watcher(
         config::validate_global_config(&global_config)?;
         config::validate_rules_config(&rules_conf)?;
 
-        // サービスモードではコンソール出力を無効化する
-        let mut service_global = global_config.global.clone();
-        service_global.log_to_console = false;
-
-        let (log, log_handle) = Logger::new(&service_global)?;
+        // サービスモードではコンソール出力を無効化する（allow_console=false）
+        let (log, log_handle) = Logger::new_system(&global_config.system_log, false)?;
         let log = Arc::new(log);
 
         log.info("Windowsサービスとして起動しました".to_string());
 
         let result = tokio::select! {
-            result = watcher::start_watching(&rules_conf.rules, &service_global, Arc::clone(&log)) => result,
+            result = watcher::start_watching(&rules_conf.rules, &global_config.retry, Arc::clone(&log)) => result,
             _ = stop_rx => {
                 let _ = status_handle.set_service_status(ServiceStatus {
                     service_type: ServiceType::OWN_PROCESS,

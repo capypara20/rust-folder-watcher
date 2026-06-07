@@ -7,18 +7,33 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc;
 
-use crate::config::{Global, LogLevel, LogRotation};
+use crate::config::{LogLevel, LogRotation, SystemLogConfig};
 use crate::error::AppError;
 use unicode_width::UnicodeWidthStr;
 
 const SEPARATOR: &str = "──────────────────────────────────────────────────────────────";
 
-const FILE_LEVEL_WIDTH: usize = 7;
-const FILE_EVENTS_WIDTH: usize = 27;
+/// システムログ level カラムの表示列幅（"ERROR" = 5 列）。
+const SYS_LEVEL_WIDTH: usize = 5;
+/// 検知ログ events カラムの表示列幅。
+const DETECT_EVENTS_WIDTH: usize = 20;
+/// アクションログ ステップカラムの表示列幅（"10. copy" 程度を想定）。
+const ACTION_STEP_WIDTH: usize = 9;
+
+/// ログの種類。`writer_task` がこの種別で整形を分岐する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogKind {
+    /// システムログ（全体1本・ライフサイクル＋システムエラー）。
+    System,
+    /// 検知ログ（ルール別・検知イベントのみ）。
+    Detect,
+    /// アクションログ（ルール別・ブロック構造）。
+    Action,
+}
 
 /// 表示列幅 (East Asian Width, CJK モード) で左寄せパディングする。
 /// Rust 標準の `format!("{:<width$}")` は char 数で揃えるため、
-/// '└' '│' '├' '─' などの罫線記号で表示時に列幅がズレる。
+/// '│' '═' などの罫線記号で表示時に列幅がズレる。
 /// 本プロジェクトは日本語ロケール (CJK) を主用途とするため、
 /// East Asian Ambiguous 文字を 2 列幅として扱う `width_cjk()` を使う。
 fn pad_left_display(s: &str, total_cols: usize) -> String {
@@ -35,33 +50,60 @@ fn pad_left_display(s: &str, total_cols: usize) -> String {
 }
 
 #[derive(Debug)]
+// `total` は将来 "N/total" 表示に使う余地を残して保持する。`Warn` は
+// システム警告用の API として残す（現状の呼び出し元はまだ無い）。
+#[allow(dead_code)]
 pub enum LogEntry {
-    /// イベントブロック開始
+    /// 検知（1ファイル/フォルダのマッチ）。
     Match {
         rule_name: String,
         path: String,
         events: HashSet<crate::config::Event>,
     },
-    /// アクションチェーン ステップ開始
+    /// アクションログのブロック開始セパレータ。
+    ActionBlockStart {
+        path: String,
+        events: HashSet<crate::config::Event>,
+        action_count: usize,
+    },
+    /// アクションチェーン ステップ開始。
     Action {
         index: usize,
         total: usize,
         action_type: String,
         detail: String,
     },
-    /// アクションチェーン ステップ完了
+    /// アクションチェーン ステップ完了（成功）。
     ActionOk {
         index: usize,
         total: usize,
         msg: String,
     },
-    /// 通常情報
+    /// アクションチェーン ステップ失敗。
+    ActionErr {
+        index: usize,
+        total: usize,
+        msg: String,
+    },
+    /// アクションチェーン ステップ警告（スキップ・リトライ等）。
+    ActionWarn {
+        index: usize,
+        total: usize,
+        msg: String,
+    },
+    /// アクションチェーン 補足情報（別ボリュームへの copy+delete 等）。
+    ActionNote {
+        index: usize,
+        total: usize,
+        msg: String,
+    },
+    /// 通常情報。
     Info(String),
-    /// 警告
+    /// 警告。
     Warn(String),
-    /// エラー
+    /// エラー。
     Error(String),
-    /// チャネルをクローズしてロガーを終了させる
+    /// チャネルをクローズしてロガーを終了させる。
     Shutdown,
 }
 
@@ -70,51 +112,67 @@ pub struct Logger {
 }
 
 impl Logger {
-    pub fn new(global: &Global) -> Result<(Self, tokio::task::JoinHandle<()>), AppError> {
+    /// システムログ用ロガー。`allow_console` が false（サービスモード等）なら
+    /// 設定の console によらずコンソール出力を無効化する。
+    pub fn new_system(
+        cfg: &SystemLogConfig,
+        allow_console: bool,
+    ) -> Result<(Self, tokio::task::JoinHandle<()>), AppError> {
         #[cfg(windows)]
         colored::control::set_virtual_terminal(true).ok();
         colored::control::set_override(true);
 
-        let terminal_level = global.terminal_log_level.clone()
-            .unwrap_or_else(|| global.log_level.clone());
-        let file_level = global.file_log_level.clone()
-            .unwrap_or_else(|| global.log_level.clone());
-        let log_dir = global.log_dir.clone();
-        let log_file_name = global.log_file_name.clone();
-        let log_rotation = global.log_rotation.clone();
-        let log_to_console = global.log_to_console;
-        let log_to_file = global.log_to_file;
+        let console = cfg.console && allow_console;
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(writer_task(
             rx,
-            log_dir,
-            log_file_name,
-            terminal_level,
-            file_level,
-            log_rotation,
-            log_to_console,
-            log_to_file,
+            cfg.dir.clone(),
+            cfg.file_name.clone(),
+            cfg.rotation.clone(),
+            LogKind::System,
+            cfg.level.clone(),
+            console,
+            cfg.enabled,
         ));
         Ok((Self { tx }, handle))
     }
 
-    /// ルール別ログ専用ロガー（ファイル出力のみ、コンソール出力なし）。
-    pub fn for_rule(
-        log_dir: String,
-        log_file_name: String,
-        log_rotation: LogRotation,
-        file_level: LogLevel,
+    /// 検知ログ用ロガー（ファイル出力のみ・level フィルタなし）。
+    pub fn for_detect(
+        dir: String,
+        file_name: String,
+        rotation: LogRotation,
     ) -> Result<(Self, tokio::task::JoinHandle<()>), AppError> {
         let (tx, rx) = mpsc::unbounded_channel();
         let handle = tokio::spawn(writer_task(
             rx,
-            log_dir,
-            log_file_name,
-            LogLevel::Error, // terminal は無効（log_to_console=false のため参照されない）
-            file_level,
-            log_rotation,
-            false, // log_to_console
-            true,  // log_to_file
+            dir,
+            file_name,
+            rotation,
+            LogKind::Detect,
+            LogLevel::Info,
+            false,
+            true,
+        ));
+        Ok((Self { tx }, handle))
+    }
+
+    /// アクションログ用ロガー（ファイル出力のみ・ブロック構造）。
+    pub fn for_action(
+        dir: String,
+        file_name: String,
+        rotation: LogRotation,
+    ) -> Result<(Self, tokio::task::JoinHandle<()>), AppError> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(writer_task(
+            rx,
+            dir,
+            file_name,
+            rotation,
+            LogKind::Action,
+            LogLevel::Info,
+            false,
+            true,
         ));
         Ok((Self { tx }, handle))
     }
@@ -129,6 +187,19 @@ impl Logger {
             rule_name: rule_name.into(),
             path: path.into(),
             events,
+        });
+    }
+
+    pub fn log_block_start(
+        &self,
+        path: impl Into<String>,
+        events: HashSet<crate::config::Event>,
+        action_count: usize,
+    ) {
+        let _ = self.tx.send(LogEntry::ActionBlockStart {
+            path: path.into(),
+            events,
+            action_count,
         });
     }
 
@@ -155,10 +226,35 @@ impl Logger {
         });
     }
 
+    pub fn log_action_err(&self, index: usize, total: usize, msg: impl Into<String>) {
+        let _ = self.tx.send(LogEntry::ActionErr {
+            index,
+            total,
+            msg: msg.into(),
+        });
+    }
+
+    pub fn log_action_warn(&self, index: usize, total: usize, msg: impl Into<String>) {
+        let _ = self.tx.send(LogEntry::ActionWarn {
+            index,
+            total,
+            msg: msg.into(),
+        });
+    }
+
+    pub fn log_action_note(&self, index: usize, total: usize, msg: impl Into<String>) {
+        let _ = self.tx.send(LogEntry::ActionNote {
+            index,
+            total,
+            msg: msg.into(),
+        });
+    }
+
     pub fn info(&self, msg: impl Into<String>) {
         let _ = self.tx.send(LogEntry::Info(msg.into()));
     }
 
+    #[allow(dead_code)]
     pub fn warn(&self, msg: impl Into<String>) {
         let _ = self.tx.send(LogEntry::Warn(msg.into()));
     }
@@ -196,7 +292,7 @@ async fn open_log_file(path: &PathBuf) -> Option<tokio::fs::File> {
     }
 }
 
-/// アクション種別を最大4文字の短縮名に変換する。
+/// アクション種別を短縮名に変換する（copy/move/cmd/exec/log）。
 fn action_type_short(action_type: &str) -> &str {
     match action_type {
         "copy" => "copy",
@@ -210,67 +306,71 @@ fn action_type_short(action_type: &str) -> &str {
     }
 }
 
-/// ファイルログ用 level カラム文字列（FILE_LEVEL_WIDTH **列** 幅）を生成する。
-/// 全角記号 ('└' '├' '│') を含むため、char 数ではなく表示列幅でパディングする。
-fn file_level_col(entry: &LogEntry) -> String {
+/// システムログに書く level ラベル。書き込み対象外（検知/アクション系）は None。
+fn sys_level_label(entry: &LogEntry) -> Option<&'static str> {
     match entry {
-        LogEntry::Match { .. } => pad_left_display("MATCH", FILE_LEVEL_WIDTH),
-        LogEntry::Action { index, total, action_type, .. } => {
-            let tree = if *index == *total { '└' } else { '├' };
-            let short = action_type_short(action_type);
-            let index_str = index.to_string();
-            // tree ('└'/'├' は CJK で 列幅 2) + index + space(1) + type で
-            // FILE_LEVEL_WIDTH 列に収める。type も CJK 列幅基準で切り詰める。
-            let used_cols = 2 + index_str.len() + 1;
-            let type_max_cols = FILE_LEVEL_WIDTH.saturating_sub(used_cols);
-            let mut type_part = String::new();
-            let mut used = 0usize;
-            for c in short.chars() {
-                let cw = UnicodeWidthStr::width_cjk(c.to_string().as_str());
-                if used + cw > type_max_cols { break; }
-                type_part.push(c);
-                used += cw;
-            }
-            let head = format!("{}{} {}", tree, index_str, type_part);
-            pad_left_display(&head, FILE_LEVEL_WIDTH)
-        }
-        LogEntry::ActionOk { index, total, .. } => {
-            if *index == *total {
-                // 最終ステップ完了: 継続パイプなし
-                pad_left_display("   OK", FILE_LEVEL_WIDTH)
-            } else {
-                // 中間ステップ完了: 継続パイプあり ('│' は列幅 2)
-                pad_left_display("│   OK", FILE_LEVEL_WIDTH)
-            }
-        }
-        LogEntry::Info(_) => pad_left_display("INFO", FILE_LEVEL_WIDTH),
-        LogEntry::Warn(_) => pad_left_display("WARN", FILE_LEVEL_WIDTH),
-        LogEntry::Error(_) => pad_left_display("ERROR", FILE_LEVEL_WIDTH),
-        LogEntry::Shutdown => unreachable!(),
+        LogEntry::Info(_) => Some("INFO"),
+        LogEntry::Warn(_) => Some("WARN"),
+        LogEntry::Error(_) => Some("ERROR"),
+        _ => None,
     }
 }
 
-/// ファイルログ用 events カラム文字列（FILE_EVENTS_WIDTH **列** 幅）を生成する。
-/// MATCH エントリのみイベント名を出力し、それ以外は空白で埋める。
-fn file_events_col(entry: &LogEntry) -> String {
-    let s = match entry {
-        LogEntry::Match { events, .. } => format_events(events),
+/// システムログ content カラム。
+fn sys_content(entry: &LogEntry) -> String {
+    match entry {
+        LogEntry::Info(msg) | LogEntry::Warn(msg) | LogEntry::Error(msg) => msg.clone(),
         _ => String::new(),
-    };
-    pad_left_display(&s, FILE_EVENTS_WIDTH)
+    }
 }
 
-/// ファイルログ用 content カラムを生成する。
-fn file_content(entry: &LogEntry) -> String {
+/// アクションログのステップ番号・ラベル・本文を取り出す。Action系以外は None。
+fn action_step_parts(entry: &LogEntry) -> Option<(usize, String, String)> {
     match entry {
-        LogEntry::Match { path, .. } => path.clone(),
-        LogEntry::Action { detail, .. } => detail.replace('\n', r"\n"),
-        LogEntry::ActionOk { msg, .. } => msg.clone(),
-        LogEntry::Info(msg) => msg.clone(),
-        LogEntry::Warn(msg) => msg.clone(),
-        LogEntry::Error(msg) => msg.clone(),
-        LogEntry::Shutdown => unreachable!(),
+        LogEntry::Action { index, action_type, detail, .. } => {
+            Some((*index, action_type_short(action_type).to_string(), detail.replace('\n', r"\n")))
+        }
+        LogEntry::ActionOk { index, msg, .. } => Some((*index, "OK".to_string(), msg.clone())),
+        LogEntry::ActionErr { index, msg, .. } => Some((*index, "ERR".to_string(), msg.clone())),
+        LogEntry::ActionWarn { index, msg, .. } => Some((*index, "WARN".to_string(), msg.clone())),
+        LogEntry::ActionNote { index, msg, .. } => Some((*index, "--".to_string(), msg.clone())),
+        _ => None,
     }
+}
+
+/// アクションログのステップカラム文字列を生成する。
+/// `index == 0` は番号なし（ルール階層のチェーン全体エラー等）で描画する。
+fn render_step_col(index: usize, label: &str) -> String {
+    let s = if index == 0 {
+        label.to_string()
+    } else {
+        format!("{index}. {label}")
+    };
+    pad_left_display(&s, ACTION_STEP_WIDTH)
+}
+
+/// アクションログのブロック開始セパレータ行を生成する。
+fn render_block_start(
+    seq: usize,
+    ts: &str,
+    path: &str,
+    events: &HashSet<crate::config::Event>,
+    action_count: usize,
+) -> String {
+    format!(
+        "═══ #{seq}  {ts}  {path}  ({})  actions={action_count} ═══\n",
+        format_events(events)
+    )
+}
+
+/// 検知ログの1行を生成する。
+fn render_detect_line(ts: &str, events: &HashSet<crate::config::Event>, path: &str) -> String {
+    format!(
+        "{} │ {} │ {}\n",
+        ts,
+        pad_left_display(&format_events(events), DETECT_EVENTS_WIDTH),
+        path
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -278,15 +378,17 @@ async fn writer_task(
     mut rx: mpsc::UnboundedReceiver<LogEntry>,
     log_dir: String,
     log_file_name: String,
-    terminal_level: LogLevel,
-    file_level: LogLevel,
     log_rotation: LogRotation,
-    log_to_console: bool,
-    log_to_file: bool,
+    kind: LogKind,
+    level: LogLevel,
+    console: bool,
+    enabled: bool,
 ) {
     let mut current_date = Local::now().format("%Y%m%d").to_string();
     let log_path = build_log_path(&log_dir, &log_file_name);
-    let mut file = if log_to_file { open_log_file(&log_path).await } else { None };
+    let mut file = if enabled { open_log_file(&log_path).await } else { None };
+    // アクションログのブロック連番（日次ローテで #1 にリセット）。
+    let mut block_seq: usize = 0;
 
     while let Some(entry) = rx.recv().await {
         if matches!(entry, LogEntry::Shutdown) {
@@ -295,43 +397,66 @@ async fn writer_task(
 
         let now = Local::now();
         let today = now.format("%Y%m%d").to_string();
-        if log_to_file && matches!(log_rotation, LogRotation::Daily) && today != current_date {
+        if enabled && matches!(log_rotation, LogRotation::Daily) && today != current_date {
             if let Some(mut f) = file.take() {
                 let _ = f.flush().await;
             }
             current_date = today;
+            block_seq = 0;
             let new_path = build_log_path(&log_dir, &log_file_name);
             file = open_log_file(&new_path).await;
         }
 
         let ts = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        // ─── ファイルログ（4カラム固定幅フォーマット）───────────────────────
-        if log_to_file {
-            let file_line = match &entry {
-                LogEntry::Match { .. } | LogEntry::Action { .. } | LogEntry::ActionOk { .. }
-                | LogEntry::Info(_) | LogEntry::Warn(_) | LogEntry::Error(_) => {
-                    if !level_enabled_for_entry(&file_level, &entry) {
-                        String::new()
-                    } else {
-                        let lv = file_level_col(&entry);
-                        let ev = file_events_col(&entry);
-                        let ct = file_content(&entry);
-                        format!("{} │ {} │ {} │ {}\n", ts, lv, ev, ct)
+        // ─── ファイルログ（kind 別フォーマット）─────────────────────────────
+        if enabled {
+            match kind {
+                LogKind::System => {
+                    if let Some(lbl) = sys_level_label(&entry) {
+                        if level_enabled_for_entry(&level, &entry) {
+                            let line = format!(
+                                "{} │ {} │ {}\n",
+                                ts,
+                                pad_left_display(lbl, SYS_LEVEL_WIDTH),
+                                sys_content(&entry)
+                            );
+                            write_file(&mut file, &line).await;
+                        }
                     }
                 }
-                LogEntry::Shutdown => unreachable!(),
-            };
-            if !file_line.is_empty() {
-                write_file(&mut file, &file_line).await;
+                LogKind::Detect => {
+                    if let LogEntry::Match { events, path, .. } = &entry {
+                        let line = render_detect_line(&ts, events, path);
+                        write_file(&mut file, &line).await;
+                    }
+                }
+                LogKind::Action => match &entry {
+                    LogEntry::ActionBlockStart { path, events, action_count } => {
+                        block_seq += 1;
+                        let line = render_block_start(block_seq, &ts, path, events, *action_count);
+                        write_file(&mut file, &line).await;
+                    }
+                    _ => {
+                        if let Some((idx, label, content)) = action_step_parts(&entry) {
+                            let line = format!(
+                                "{} │ {} │ {}\n",
+                                ts,
+                                render_step_col(idx, &label),
+                                content
+                            );
+                            write_file(&mut file, &line).await;
+                        }
+                    }
+                },
             }
         }
 
-        // ─── ターミナル出力（カラー付き従来フォーマット）─────────────────────
-        if log_to_console {
+        // ─── ターミナル出力（System ロガーのみ・カラー付き従来フォーマット）───
+        if console {
             match &entry {
                 LogEntry::Match { rule_name, path, events } => {
-                    if !level_enabled(&terminal_level, &LogLevel::Info) { continue; }
+                    if !level_enabled(&level, &LogLevel::Info) { continue; }
                     let event_str = format_events(events);
                     let term_line = format!(
                         "{}\n{} {}",
@@ -343,7 +468,7 @@ async fn writer_task(
                 }
 
                 LogEntry::Action { index, total, action_type, detail } => {
-                    if !level_enabled(&terminal_level, &LogLevel::Info) { continue; }
+                    if !level_enabled(&level, &LogLevel::Info) { continue; }
                     let term_line = format!(
                         "{} {}",
                         format!("[{ts}] [ACTION]").blue().bold(),
@@ -353,7 +478,7 @@ async fn writer_task(
                 }
 
                 LogEntry::ActionOk { msg, .. } => {
-                    if !level_enabled(&terminal_level, &LogLevel::Info) { continue; }
+                    if !level_enabled(&level, &LogLevel::Info) { continue; }
                     let term_line = format!(
                         "{} {}",
                         format!("[{ts}] [OK]    ").green().bold(),
@@ -362,8 +487,38 @@ async fn writer_task(
                     println!("{}", term_line);
                 }
 
+                LogEntry::ActionNote { msg, .. } => {
+                    if !level_enabled(&level, &LogLevel::Info) { continue; }
+                    let term_line = format!(
+                        "{} {}",
+                        format!("[{ts}] [INFO]").cyan(),
+                        msg
+                    );
+                    println!("{}", term_line);
+                }
+
+                LogEntry::ActionWarn { msg, .. } => {
+                    if !level_enabled(&level, &LogLevel::Warn) { continue; }
+                    let term_line = format!(
+                        "{} {}",
+                        format!("[{ts}] [WARN]").yellow().bold(),
+                        msg
+                    );
+                    println!("{}", term_line);
+                }
+
+                LogEntry::ActionErr { msg, .. } => {
+                    if !level_enabled(&level, &LogLevel::Error) { continue; }
+                    let term_line = format!(
+                        "{} {}",
+                        format!("[{ts}] [ERROR]").red().bold(),
+                        msg
+                    );
+                    eprintln!("{}", term_line);
+                }
+
                 LogEntry::Info(msg) => {
-                    if !level_enabled(&terminal_level, &LogLevel::Info) { continue; }
+                    if !level_enabled(&level, &LogLevel::Info) { continue; }
                     let term_line = format!(
                         "{} {}",
                         format!("[{ts}] [INFO]").cyan(),
@@ -373,7 +528,7 @@ async fn writer_task(
                 }
 
                 LogEntry::Warn(msg) => {
-                    if !level_enabled(&terminal_level, &LogLevel::Warn) { continue; }
+                    if !level_enabled(&level, &LogLevel::Warn) { continue; }
                     let term_line = format!(
                         "{} {}",
                         format!("[{ts}] [WARN]").yellow().bold(),
@@ -383,7 +538,7 @@ async fn writer_task(
                 }
 
                 LogEntry::Error(msg) => {
-                    if !level_enabled(&terminal_level, &LogLevel::Error) { continue; }
+                    if !level_enabled(&level, &LogLevel::Error) { continue; }
                     let term_line = format!(
                         "{} {}",
                         format!("[{ts}] [ERROR]").red().bold(),
@@ -392,6 +547,8 @@ async fn writer_task(
                     eprintln!("{}", term_line);
                 }
 
+                // ブロック開始セパレータはファイル専用（コンソールには出さない）
+                LogEntry::ActionBlockStart { .. } => {}
                 LogEntry::Shutdown => unreachable!(),
             }
         }
@@ -451,46 +608,117 @@ fn format_events(events: &HashSet<crate::config::Event>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Event;
 
-    /// 罫線文字 ('└') は East Asian Ambiguous で、CJK モードでは 2 列幅。
-    /// "└1 log" は 2+1+1+1+1+1 = 7 列、ピッタリ収まる。
-    #[test]
-    fn test_pad_left_display_with_eaw_chars() {
-        let s = pad_left_display("└1 log", 7);
-        assert_eq!(UnicodeWidthStr::width_cjk(s.as_str()), 7);
-        assert_eq!(s, "└1 log"); // 既に 7 列なので追加スペースなし
+    fn events(list: &[Event]) -> HashSet<Event> {
+        list.iter().cloned().collect()
     }
 
-    /// ASCII のみの文字列は char 数と CJK 列幅が一致する
     #[test]
     fn test_pad_left_display_ascii() {
-        let s = pad_left_display("MATCH", 7);
-        assert_eq!(s, "MATCH  ");
-        assert_eq!(UnicodeWidthStr::width_cjk(s.as_str()), 7);
+        let s = pad_left_display("INFO", SYS_LEVEL_WIDTH);
+        assert_eq!(s, "INFO ");
+        assert_eq!(UnicodeWidthStr::width_cjk(s.as_str()), SYS_LEVEL_WIDTH);
     }
 
-    /// '│' は CJK で 2 列幅。"│   OK" は 2+3+2 = 7 列。
     #[test]
-    fn test_pad_left_display_middle_action_ok() {
-        let s = pad_left_display("│   OK", 7);
-        assert_eq!(UnicodeWidthStr::width_cjk(s.as_str()), 7);
-    }
-
-    /// 列幅オーバーは切り詰めず返す (元の動作維持)
-    #[test]
-    fn test_pad_left_display_overflow() {
+    fn test_pad_left_display_overflow_not_truncated() {
         let s = pad_left_display("VERYLONGTEXT", 5);
         assert_eq!(s, "VERYLONGTEXT");
     }
 
-    /// 罫線なしのレベル文字列が CJK 列幅 7 列で揃う
+    /// ステップカラムはペア番号付き（`1. copy` ↔ `1. OK`）で揃う。
     #[test]
-    fn test_pad_left_display_info_aligns_with_match() {
-        let info = pad_left_display("INFO", FILE_LEVEL_WIDTH);
-        let match_ = pad_left_display("MATCH", FILE_LEVEL_WIDTH);
-        let action_ok = pad_left_display("│   OK", FILE_LEVEL_WIDTH);
-        assert_eq!(UnicodeWidthStr::width_cjk(info.as_str()), FILE_LEVEL_WIDTH);
-        assert_eq!(UnicodeWidthStr::width_cjk(match_.as_str()), FILE_LEVEL_WIDTH);
-        assert_eq!(UnicodeWidthStr::width_cjk(action_ok.as_str()), FILE_LEVEL_WIDTH);
+    fn test_render_step_col_numbered_pair() {
+        let start = render_step_col(1, "copy");
+        let ok = render_step_col(1, "OK");
+        assert!(start.starts_with("1. copy"));
+        assert!(ok.starts_with("1. OK"));
+        assert_eq!(UnicodeWidthStr::width_cjk(start.as_str()), ACTION_STEP_WIDTH);
+        assert_eq!(UnicodeWidthStr::width_cjk(ok.as_str()), ACTION_STEP_WIDTH);
+    }
+
+    /// index 0 は番号なしで描画する（チェーン全体エラー等）。
+    #[test]
+    fn test_render_step_col_index_zero_no_number() {
+        let s = render_step_col(0, "ERR");
+        assert!(s.starts_with("ERR"));
+        assert!(!s.contains('.'));
+    }
+
+    /// ブロック開始セパレータに連番・パス・イベント・アクション数が入る。
+    #[test]
+    fn test_render_block_start_contains_fields() {
+        let line = render_block_start(
+            1,
+            "2026-06-07 10:05:30",
+            "C:/watch/csv/data.csv",
+            &events(&[Event::Create]),
+            2,
+        );
+        assert!(line.starts_with("═══ #1"));
+        assert!(line.contains("C:/watch/csv/data.csv"));
+        assert!(line.contains("(Create)"));
+        assert!(line.contains("actions=2"));
+    }
+
+    /// 検知ログは 3 カラム（ts │ events │ path）で出力する。
+    #[test]
+    fn test_render_detect_line_three_columns() {
+        let line = render_detect_line(
+            "2026-06-07 10:05:30",
+            &events(&[Event::Create, Event::Modify]),
+            "C:/watch/a.csv",
+        );
+        assert_eq!(line.matches('│').count(), 2);
+        assert!(line.contains("Create,Modify"));
+        assert!(line.contains("C:/watch/a.csv"));
+    }
+
+    /// システムログには Info/Warn/Error のみラベルが付き、検知/アクション系は None。
+    #[test]
+    fn test_sys_level_label_skips_action_entries() {
+        assert_eq!(sys_level_label(&LogEntry::Info("x".into())), Some("INFO"));
+        assert_eq!(sys_level_label(&LogEntry::Warn("x".into())), Some("WARN"));
+        assert_eq!(sys_level_label(&LogEntry::Error("x".into())), Some("ERROR"));
+        assert_eq!(
+            sys_level_label(&LogEntry::Match {
+                rule_name: "r".into(),
+                path: "p".into(),
+                events: events(&[Event::Create]),
+            }),
+            None
+        );
+        assert_eq!(
+            sys_level_label(&LogEntry::ActionOk { index: 1, total: 1, msg: "ok".into() }),
+            None
+        );
+        assert_eq!(
+            sys_level_label(&LogEntry::ActionErr { index: 1, total: 1, msg: "e".into() }),
+            None
+        );
+    }
+
+    /// action_step_parts が各 Action 系エントリを正しく分解する。
+    #[test]
+    fn test_action_step_parts_labels() {
+        let ok = LogEntry::ActionOk { index: 2, total: 3, msg: "done".into() };
+        assert_eq!(action_step_parts(&ok), Some((2, "OK".to_string(), "done".to_string())));
+        let err = LogEntry::ActionErr { index: 1, total: 2, msg: "boom".into() };
+        assert_eq!(action_step_parts(&err), Some((1, "ERR".to_string(), "boom".to_string())));
+        let cmd = LogEntry::Action {
+            index: 1,
+            total: 1,
+            action_type: "command".into(),
+            detail: "shell=cmd".into(),
+        };
+        assert_eq!(action_step_parts(&cmd), Some((1, "cmd".to_string(), "shell=cmd".to_string())));
+        // Match は Action 系ではない
+        let m = LogEntry::Match {
+            rule_name: "r".into(),
+            path: "p".into(),
+            events: events(&[Event::Create]),
+        };
+        assert_eq!(action_step_parts(&m), None);
     }
 }
