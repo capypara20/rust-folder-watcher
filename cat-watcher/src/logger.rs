@@ -276,9 +276,22 @@ fn build_log_path(log_dir: &str, log_file_name: &str) -> PathBuf {
     PathBuf::from(log_dir).join(file_name)
 }
 
-async fn open_log_file(path: &PathBuf) -> Option<tokio::fs::File> {
+/// ログファイルを **書き込み時だけ** open → 追記 → close する（Issue #46）。
+/// バッチ単位でまとめて呼ぶことで、ハンドルを握りっぱなしにせず、かつ
+/// open/close のシステムコール回数を抑える。`content` が空なら何もしない。
+async fn append_to_file(path: &PathBuf, content: &str) {
+    if content.is_empty() {
+        return;
+    }
     match OpenOptions::new().create(true).append(true).open(path).await {
-        Ok(f) => Some(f),
+        Ok(mut f) => {
+            if let Err(e) = f.write_all(content.as_bytes()).await {
+                let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+                eprintln!("{}", format!("[{ts}] [ERROR] ログ書き込み失敗: {e}").red().bold());
+            }
+            // f はここで drop され、ファイルが閉じられる（明示 flush で確実に書き出す）
+            let _ = f.flush().await;
+        }
         Err(e) => {
             let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
             eprintln!(
@@ -287,7 +300,6 @@ async fn open_log_file(path: &PathBuf) -> Option<tokio::fs::File> {
                     .red()
                     .bold()
             );
-            None
         }
     }
 }
@@ -385,186 +397,161 @@ async fn writer_task(
     enabled: bool,
 ) {
     let mut current_date = Local::now().format("%Y%m%d").to_string();
-    let log_path = build_log_path(&log_dir, &log_file_name);
-    let mut file = if enabled { open_log_file(&log_path).await } else { None };
     // アクションログのブロック連番（日次ローテで #1 にリセット）。
     let mut block_seq: usize = 0;
 
-    while let Some(entry) = rx.recv().await {
-        if matches!(entry, LogEntry::Shutdown) {
-            break;
+    while let Some(first) = rx.recv().await {
+        // バッチ収集（Issue #46）: まず 1 件を待ち、キューにたまっている分を
+        // try_recv で一気にすくい取る。こうしてバッチ単位で 1 回だけ
+        // open → write → close することで、ハンドルを握りっぱなしにせず、
+        // かつ open/close のシステムコール回数も抑える。
+        let mut batch = vec![first];
+        loop {
+            match rx.try_recv() {
+                Ok(e) => batch.push(e),
+                Err(_) => break,
+            }
         }
 
         let now = Local::now();
         let today = now.format("%Y%m%d").to_string();
-        if enabled && matches!(log_rotation, LogRotation::Daily) && today != current_date {
-            if let Some(mut f) = file.take() {
-                let _ = f.flush().await;
-            }
+        // 日次ローテ: 日付が変わったら block_seq をリセットする。出力先パスは
+        // build_log_path が {Date} を差し替えるため自動的に当日のファイルへ向く。
+        if matches!(log_rotation, LogRotation::Daily) && today != current_date {
             current_date = today;
             block_seq = 0;
-            let new_path = build_log_path(&log_dir, &log_file_name);
-            file = open_log_file(&new_path).await;
         }
-
         let ts = now.format("%Y-%m-%d %H:%M:%S").to_string();
 
-        // ─── ファイルログ（kind 別フォーマット）─────────────────────────────
+        // このバッチで書くファイル行をためるバッファ（最後に 1 回だけ書き出す）。
+        let mut file_buf = String::new();
+        let mut shutdown = false;
+
+        for entry in &batch {
+            if matches!(entry, LogEntry::Shutdown) {
+                shutdown = true;
+                break;
+            }
+            if enabled {
+                if let Some(line) = file_line(entry, kind, &ts, &level, &mut block_seq) {
+                    file_buf.push_str(&line);
+                }
+            }
+            // ターミナル出力は従来どおり 1 件ずつ即時に行う（System ロガーのみ）。
+            if console {
+                console_print(entry, &ts, &level);
+            }
+        }
+
+        // バッチをまとめて 1 回の open → write → close で書き出す。
         if enabled {
-            match kind {
-                LogKind::System => {
-                    if let Some(lbl) = sys_level_label(&entry) {
-                        if level_enabled_for_entry(&level, &entry) {
-                            let line = format!(
-                                "{} │ {} │ {}\n",
-                                ts,
-                                pad_left_display(lbl, SYS_LEVEL_WIDTH),
-                                sys_content(&entry)
-                            );
-                            write_file(&mut file, &line).await;
-                        }
-                    }
-                }
-                LogKind::Detect => {
-                    if let LogEntry::Match { events, path, .. } = &entry {
-                        let line = render_detect_line(&ts, events, path);
-                        write_file(&mut file, &line).await;
-                    }
-                }
-                LogKind::Action => match &entry {
-                    LogEntry::ActionBlockStart { path, events, action_count } => {
-                        block_seq += 1;
-                        let line = render_block_start(block_seq, &ts, path, events, *action_count);
-                        write_file(&mut file, &line).await;
-                    }
-                    _ => {
-                        if let Some((idx, label, content)) = action_step_parts(&entry) {
-                            let line = format!(
-                                "{} │ {} │ {}\n",
-                                ts,
-                                render_step_col(idx, &label),
-                                content
-                            );
-                            write_file(&mut file, &line).await;
-                        }
-                    }
-                },
-            }
+            append_to_file(&build_log_path(&log_dir, &log_file_name), &file_buf).await;
         }
-
-        // ─── ターミナル出力（System ロガーのみ・カラー付き従来フォーマット）───
-        if console {
-            match &entry {
-                LogEntry::Match { rule_name, path, events } => {
-                    if !level_enabled(&level, &LogLevel::Info) { continue; }
-                    let event_str = format_events(events);
-                    let term_line = format!(
-                        "{}\n{} {}",
-                        SEPARATOR.bright_green().dimmed(),
-                        format!("[{ts}] [MATCH]").bright_green().bold(),
-                        format!("  ルール={rule_name} | パス={path} | {event_str}")
-                    );
-                    println!("{}", term_line);
-                }
-
-                LogEntry::Action { index, total, action_type, detail } => {
-                    if !level_enabled(&level, &LogLevel::Info) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [ACTION]").blue().bold(),
-                        format!("  ({index}/{total}) {action_type}  {detail}")
-                    );
-                    println!("{}", term_line);
-                }
-
-                LogEntry::ActionOk { msg, .. } => {
-                    if !level_enabled(&level, &LogLevel::Info) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [OK]    ").green().bold(),
-                        msg
-                    );
-                    println!("{}", term_line);
-                }
-
-                LogEntry::ActionNote { msg, .. } => {
-                    if !level_enabled(&level, &LogLevel::Info) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [INFO]").cyan(),
-                        msg
-                    );
-                    println!("{}", term_line);
-                }
-
-                LogEntry::ActionWarn { msg, .. } => {
-                    if !level_enabled(&level, &LogLevel::Warn) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [WARN]").yellow().bold(),
-                        msg
-                    );
-                    println!("{}", term_line);
-                }
-
-                LogEntry::ActionErr { msg, .. } => {
-                    if !level_enabled(&level, &LogLevel::Error) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [ERROR]").red().bold(),
-                        msg
-                    );
-                    eprintln!("{}", term_line);
-                }
-
-                LogEntry::Info(msg) => {
-                    if !level_enabled(&level, &LogLevel::Info) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [INFO]").cyan(),
-                        msg
-                    );
-                    println!("{}", term_line);
-                }
-
-                LogEntry::Warn(msg) => {
-                    if !level_enabled(&level, &LogLevel::Warn) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [WARN]").yellow().bold(),
-                        msg
-                    );
-                    println!("{}", term_line);
-                }
-
-                LogEntry::Error(msg) => {
-                    if !level_enabled(&level, &LogLevel::Error) { continue; }
-                    let term_line = format!(
-                        "{} {}",
-                        format!("[{ts}] [ERROR]").red().bold(),
-                        msg
-                    );
-                    eprintln!("{}", term_line);
-                }
-
-                // ブロック開始セパレータはファイル専用（コンソールには出さない）
-                LogEntry::ActionBlockStart { .. } => {}
-                LogEntry::Shutdown => unreachable!(),
-            }
+        if shutdown {
+            break;
         }
-    }
-
-    if let Some(mut f) = file {
-        let _ = f.flush().await;
     }
 }
 
-async fn write_file(file: &mut Option<tokio::fs::File>, line: &str) {
-    if let Some(f) = file {
-        if let Err(e) = f.write_all(line.as_bytes()).await {
-            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-            eprintln!("{}", format!("[{ts}] [ERROR] ログ書き込み失敗: {e}").red().bold());
+/// 1 エントリのファイル出力行を生成する（kind 別フォーマット）。
+/// 書き込み対象外なら None。`block_seq` はアクションブロック開始で +1 する。
+fn file_line(
+    entry: &LogEntry,
+    kind: LogKind,
+    ts: &str,
+    level: &LogLevel,
+    block_seq: &mut usize,
+) -> Option<String> {
+    match kind {
+        LogKind::System => {
+            let lbl = sys_level_label(entry)?;
+            if !level_enabled_for_entry(level, entry) {
+                return None;
+            }
+            Some(format!(
+                "{} │ {} │ {}\n",
+                ts,
+                pad_left_display(lbl, SYS_LEVEL_WIDTH),
+                sys_content(entry)
+            ))
         }
+        LogKind::Detect => match entry {
+            LogEntry::Match { events, path, .. } => Some(render_detect_line(ts, events, path)),
+            _ => None,
+        },
+        LogKind::Action => match entry {
+            LogEntry::ActionBlockStart { path, events, action_count } => {
+                *block_seq += 1;
+                Some(render_block_start(*block_seq, ts, path, events, *action_count))
+            }
+            _ => action_step_parts(entry).map(|(idx, label, content)| {
+                format!("{} │ {} │ {}\n", ts, render_step_col(idx, &label), content)
+            }),
+        },
+    }
+}
+
+/// 1 エントリをターミナルへカラー付きで出力する（従来フォーマットを維持）。
+fn console_print(entry: &LogEntry, ts: &str, level: &LogLevel) {
+    match entry {
+        LogEntry::Match { rule_name, path, events } => {
+            if !level_enabled(level, &LogLevel::Info) { return; }
+            let event_str = format_events(events);
+            println!(
+                "{}\n{} {}",
+                SEPARATOR.bright_green().dimmed(),
+                format!("[{ts}] [MATCH]").bright_green().bold(),
+                format!("  ルール={rule_name} | パス={path} | {event_str}")
+            );
+        }
+
+        LogEntry::Action { index, total, action_type, detail } => {
+            if !level_enabled(level, &LogLevel::Info) { return; }
+            println!(
+                "{} {}",
+                format!("[{ts}] [ACTION]").blue().bold(),
+                format!("  ({index}/{total}) {action_type}  {detail}")
+            );
+        }
+
+        LogEntry::ActionOk { msg, .. } => {
+            if !level_enabled(level, &LogLevel::Info) { return; }
+            println!("{} {}", format!("[{ts}] [OK]    ").green().bold(), msg);
+        }
+
+        LogEntry::ActionNote { msg, .. } => {
+            if !level_enabled(level, &LogLevel::Info) { return; }
+            println!("{} {}", format!("[{ts}] [INFO]").cyan(), msg);
+        }
+
+        LogEntry::ActionWarn { msg, .. } => {
+            if !level_enabled(level, &LogLevel::Warn) { return; }
+            println!("{} {}", format!("[{ts}] [WARN]").yellow().bold(), msg);
+        }
+
+        LogEntry::ActionErr { msg, .. } => {
+            if !level_enabled(level, &LogLevel::Error) { return; }
+            eprintln!("{} {}", format!("[{ts}] [ERROR]").red().bold(), msg);
+        }
+
+        LogEntry::Info(msg) => {
+            if !level_enabled(level, &LogLevel::Info) { return; }
+            println!("{} {}", format!("[{ts}] [INFO]").cyan(), msg);
+        }
+
+        LogEntry::Warn(msg) => {
+            if !level_enabled(level, &LogLevel::Warn) { return; }
+            println!("{} {}", format!("[{ts}] [WARN]").yellow().bold(), msg);
+        }
+
+        LogEntry::Error(msg) => {
+            if !level_enabled(level, &LogLevel::Error) { return; }
+            eprintln!("{} {}", format!("[{ts}] [ERROR]").red().bold(), msg);
+        }
+
+        // ブロック開始セパレータはファイル専用（コンソールには出さない）
+        LogEntry::ActionBlockStart { .. } => {}
+        LogEntry::Shutdown => {}
     }
 }
 
