@@ -8,7 +8,7 @@ interval_ms = 1000    # 再試行間隔（ミリ秒）
 # 検知・アクションの結果はルール別ログ（rules.toml の [rules.log]）に出ます。
 [system_log]
 enabled   = true
-dir       = "C:\logs"
+dir       = 'C:\logs'
 file_name = "system_{Date}.log"   # {Date} / {DateTime}
 rotation  = "daily"               # daily / never
 level     = "info"                # trace / debug / info / warn / error
@@ -20,7 +20,7 @@ enabled = true
 name    = "ルール名"
 
 [rules.watch]
-path             = "C:\監視フォルダ"
+path             = 'C:\監視フォルダ'
 recursive        = true
 target           = "file"          # file / directory / both
 include_hidden   = false
@@ -36,13 +36,13 @@ events           = ["create"]      # create / modify / delete / rename
 
 [rules.log.detect]
 enabled   = true
-dir       = "C:\logs"
+dir       = 'C:\logs'
 file_name = "detect_ルール名_{Date}.log"
 rotation  = "daily"
 
 [rules.log.action]
 enabled   = true
-dir       = "C:\logs"
+dir       = 'C:\logs'
 file_name = "action_ルール名_{Date}.log"
 rotation  = "daily"
 
@@ -54,14 +54,14 @@ message = "検知: {BaseName}"
 
 # [[rules.actions]]                # ─── copy ──────────────────────────────
 # type               = "copy"
-# destination        = "D:\backup\{Date}"
+# destination        = 'D:\backup\{Date}'
 # overwrite          = false
 # preserve_structure = false
 # verify_integrity   = true
 
 # [[rules.actions]]                # ─── move ──────────────────────────────
 # type               = "move"
-# destination        = "D:\archive\{Date}"
+# destination        = 'D:\archive\{Date}'
 # overwrite          = false
 # preserve_structure = false
 # verify_integrity   = false
@@ -74,7 +74,7 @@ message = "検知: {BaseName}"
 
 # [[rules.actions]]                # ─── execute ────────────────────────────
 # type        = "execute"
-# program     = "C:\tool\app.exe"
+# program     = 'C:\tool\app.exe'
 # args        = ["{FullName}"]
 # working_dir = ""
 "#;

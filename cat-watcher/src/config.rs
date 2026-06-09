@@ -2009,4 +2009,51 @@ mod tests {
 		let result = validate_rules_config(&config);
 		assert!(result.is_ok());
 	}
+
+	// =========================================================
+	// テンプレート TOML パーステスト
+	// Windows バックスラッシュパスが TOML として正しくパースできること
+	// =========================================================
+
+	#[test]
+	fn test_global_template_is_valid_toml() {
+		use crate::templates::GLOBAL_TOML;
+		let result = toml::from_str::<toml::Value>(GLOBAL_TOML);
+		assert!(
+			result.is_ok(),
+			"GLOBAL_TOML テンプレートが TOML としてパースできません: {:?}",
+			result.err()
+		);
+	}
+
+	#[test]
+	fn test_global_template_windows_path_preserved() {
+		use crate::templates::GLOBAL_TOML;
+		let val: toml::Value = toml::from_str(GLOBAL_TOML).unwrap();
+		let dir = val["system_log"]["dir"].as_str().unwrap();
+		assert_eq!(dir, r"C:\logs", "system_log.dir のパスが正しく保持されていません");
+	}
+
+	#[test]
+	fn test_rules_template_is_valid_toml() {
+		use crate::templates::RULES_TOML;
+		let result = toml::from_str::<toml::Value>(RULES_TOML);
+		assert!(
+			result.is_ok(),
+			"RULES_TOML テンプレートが TOML としてパースできません: {:?}",
+			result.err()
+		);
+	}
+
+	#[test]
+	fn test_rules_template_windows_path_preserved() {
+		use crate::templates::RULES_TOML;
+		let val: toml::Value = toml::from_str(RULES_TOML).unwrap();
+		let path = val["rules"][0]["watch"]["path"].as_str().unwrap();
+		assert_eq!(path, r"C:\監視フォルダ", "rules[0].watch.path のパスが正しく保持されていません");
+		let detect_dir = val["rules"][0]["log"]["detect"]["dir"].as_str().unwrap();
+		assert_eq!(detect_dir, r"C:\logs", "rules[0].log.detect.dir のパスが正しく保持されていません");
+		let action_dir = val["rules"][0]["log"]["action"]["dir"].as_str().unwrap();
+		assert_eq!(action_dir, r"C:\logs", "rules[0].log.action.dir のパスが正しく保持されていません");
+	}
 }
