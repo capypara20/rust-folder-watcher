@@ -171,7 +171,7 @@ async fn run(cli: &Args) -> Result<(), AppError> {
         return Ok(());
     }
 
-    let (log, log_handle) = logger::Logger::new(&global_config.global)?;
+    let (log, log_handle) = logger::Logger::new_system(&global_config.system_log, true)?;
     let log = Arc::new(log);
 
     log.info(format!(
@@ -180,11 +180,15 @@ async fn run(cli: &Args) -> Result<(), AppError> {
         rules_path.display()
     ));
 
-    watcher::start_watching(&rules_conf.rules, &global_config.global, Arc::clone(&log)).await?;
+    let result = watcher::start_watching(&rules_conf.rules, &global_config.retry, Arc::clone(&log)).await;
+    if let Err(e) = &result {
+        // 監視処理の異常終了はシステム階層のエラーとしてシステムログに残す。
+        log.error(format!("監視処理が異常終了しました: {e}"));
+    }
 
     log.shutdown();
     let _ = log_handle.await;
-    Ok(())
+    result
 }
 
 fn exit_on_err(result: Result<(), AppError>) {

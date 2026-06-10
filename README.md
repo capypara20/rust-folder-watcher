@@ -14,9 +14,9 @@
 - **プレースホルダー**: 監視ファイルのパス・名前・日時などを宛先や引数に埋め込める
 - **整合性検証**: BLAKE3 ハッシュでコピー後のファイル一致を確認
 - **リトライ機構**: ロック等で失敗したアクションを自動再試行
-- **ログローテーション**: 日次でログファイルを切り替え（`log_rotation = "never"` で固定ファイルにも対応）
-- **ルール別ログ**: ルールごとに独立したログファイルへ出力（`[rules.log]` セクションで設定）
-- **ログ出力先の個別制御**: コンソール・ファイルを個別に有効/無効、ログレベルも別々に指定可能
+- **ログ3分割**: システムログ（全体の起動日誌）／検知ログ／アクションログを目的別に分離
+- **ログローテーション**: 日次でログファイルを切り替え（`rotation = "never"` で固定ファイルにも対応）
+- **ルール別ログ**: ルールごとに検知ログ・アクションログを独立出力（`[rules.log.detect]` / `[rules.log.action]` で設定）
 - **テンプレート生成**: `--init global rules csv` のように複数のテンプレートを一括で出力できる
 - **ホームディレクトリ展開**: パス設定で `~` が使用可能（`~/logs` など）
 - **全件エラー報告**: 設定ファイルに複数の問題があっても、1 回の起動で全エラーをまとめて表示
@@ -70,22 +70,26 @@ cat-watcher --from-csv rules.csv --output rules.toml
 ### global.toml（グローバル設定）
 
 ```toml
-[global]
-log_level         = "info"                    # trace / debug / info / warn / error
-log_dir           = "C:\\logs"               # ~ によるホームディレクトリ展開も可（例: ~/logs）
-log_file_name     = "cat-watcher_{Date}.log"  # {Date} / {DateTime} を埋め込み可
-log_rotation      = "daily"                   # daily / never
-retry_count       = 3
-retry_interval_ms = 1000
+# リトライ設定（copy / move 失敗時の再試行）
+[retry]
+count       = 3
+interval_ms = 1000
 
-# ログ出力先の制御（省略時はどちらも true）
-log_to_console    = true
-log_to_file       = true
-
-# コンソール・ファイルで異なるログレベルを使いたい場合に設定（省略時は log_level を使用）
-# terminal_log_level = "info"
-# file_log_level     = "debug"
+# システムログ（プログラム全体の起動日誌・全体で1本）
+# 起動バナー / ルール一覧 / 監視開始 / 終了 と、システム階層のエラーを記録する。
+# 検知・アクションの結果は rules.toml の [rules.log] 側に出力される。
+[system_log]
+enabled   = true
+dir       = "C:\\logs"               # ~ によるホームディレクトリ展開も可（例: ~/logs）
+file_name = "system_{Date}.log"       # {Date} / {DateTime} を埋め込み可
+rotation  = "daily"                   # daily / never
+level     = "info"                    # trace / debug / info / warn / error
+console   = true                      # コンソールへの出力 ON/OFF
 ```
+
+> **v1.3.0 でログ設定は破壊的に変更されました。** 旧 `[global]`（`log_level` /
+> `log_dir` / `log_to_file` など）は廃止され、未知のキーがあると起動時にエラーで
+> 停止します。`--init global` で新しいテンプレートを出力できます。
 
 ### rules.toml（ルール定義）
 
@@ -110,12 +114,20 @@ exclude_dir_patterns = ["node_modules"]  # 除外フォルダ名 glob（exclude_
 events           = ["create", "modify"]  # create / modify / delete / rename
 
 # ── ルール別ログ（省略可）──────────────────────────────────────────────────
-# このルールにマッチしたイベントをルール専用のログファイルにも書き出す
-[rules.log]
-enabled       = true
-log_dir       = "D:\\logs\\csv-backup"
-log_file_name = "csv-backup_{Date}.log"  # {Date} / {DateTime} を埋め込み可
-log_rotation  = "daily"                  # daily / never
+# detect: 検知イベントのみを記録（timestamp │ events │ 検知パス）
+# action: 検知ごとのアクション実行内容をブロック形式で記録
+# どちらも enabled で個別に ON/OFF でき、dir / file_name / rotation を各自指定する。
+[rules.log.detect]
+enabled   = true
+dir       = "D:\\logs\\csv-backup"
+file_name = "detect_csv-backup_{Date}.log"  # {Date} / {DateTime} を埋め込み可
+rotation  = "daily"                          # daily / never
+
+[rules.log.action]
+enabled   = true
+dir       = "D:\\logs\\csv-backup"
+file_name = "action_csv-backup_{Date}.log"
+rotation  = "daily"
 
 # ──────────── アクションチェーン ────────────
 [[rules.actions]]
@@ -217,7 +229,7 @@ exclude_dir_patterns = ["node_modules"]  # ただし node_modules は除外
 
 ```
 バリデーションエラーが 3 件見つかりました:
-  [1] log_dir が存在しません: C:\logs\app
+  [1] system_log.dir が存在しません: C:\logs\app
   [2] 監視ルール名 csv-backup の watch.path が存在しません: C:\data\incoming
   [3] 監視ルール名 log-processor のアクションの type が Command のとき、shell を定義してください
 ```
@@ -243,35 +255,54 @@ shell, command, program, args, working_dir, message
 
 ## ログ
 
-ターミナルとファイルでフォーマットが異なります。
+ログは目的別に **3 種類** に分かれます。ターミナルにはこれまで同様すべてが
+色付きで流れますが、ファイルは用途ごとに分割されます。
 
-**ターミナル出力**（カラー付き）
+| 種類 | 出力先 | 内容 |
+|---|---|---|
+| システムログ | 全体で1本（`[system_log]`） | 起動バナー / ルール一覧 / 監視開始 / 終了 とシステム階層のエラー |
+| 検知ログ | ルール別（`[rules.log.detect]`） | 検知したイベントのみ（`timestamp │ events │ 検知パス`） |
+| アクションログ | ルール別（`[rules.log.action]`） | 検知ごとのアクション実行内容（ブロック構造） |
+
+**ターミナル出力**（カラー付き・全種類が流れる）
 
 ```
 ──────────────────────────────────────────────────────────────
-[2026-05-07 10:30:20] [MATCH]   ルール=csv-backup | パス=C:\data\report.csv | Create, Modify
-[2026-05-07 10:30:20] [ACTION]  (1/3) log
-[2026-05-07 10:30:20] [INFO]    検知: report.csv
-[2026-05-07 10:30:20] [ACTION]  (2/3) copy  C:\data\report.csv → D:\backup\20260507
+[2026-05-07 10:30:20] [MATCH]   ルール=csv-backup | パス=C:\data\report.csv | Create,Modify
+[2026-05-07 10:30:20] [ACTION]  (1/2) copy  destination=D:\backup\{Date}  overwrite=false
 [2026-05-07 10:30:20] [OK]      コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
-[2026-05-07 10:30:20] [ACTION]  (3/3) command  shell=powershell  cmd=Write-Host 'Backed up: ...'
-[2026-05-07 10:30:20] [OK]      コマンド完了
+[2026-05-07 10:30:20] [ACTION]  (2/2) log
+[2026-05-07 10:30:20] [OK]      検知: report.csv
 ```
 
-**ファイル出力**（4列固定幅フォーマット）
+**① システムログ**（`system_{Date}.log`）
 
 ```
-2026-05-07 10:30:20 │ INFO    │                             │ cat-watcher 起動
-2026-05-07 10:30:20 │ MATCH   │ Create,Modify               │ C:\data\report.csv
-2026-05-07 10:30:20 │ ├1 log  │                             │
-2026-05-07 10:30:20 │ │   OK  │                             │ 検知: report.csv
-2026-05-07 10:30:20 │ ├2 cop  │                             │ C:\data\report.csv → D:\backup\{Date}
-2026-05-07 10:30:20 │ │   OK  │                             │ コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
-2026-05-07 10:30:20 │ └3 cmd  │                             │ shell=powershell  cmd=Write-Host 'Backed up: ...'
-2026-05-07 10:30:20 │    OK   │                             │ 起動
+2026-05-07 10:30:18 │ INFO  │ cat-watcher 起動  global=... rules=...
+2026-05-07 10:30:18 │ INFO  │ 監視ルール [csv-backup] (有効)  パス=C:\data\incoming  イベント=作成, 変更  サブフォルダ=あり
+2026-05-07 10:30:25 │ INFO  │ 終了シグナル受信
 ```
 
-`log_to_console = false` でターミナル出力を、`log_to_file = false` でファイル出力を無効にできます。`terminal_log_level` / `file_log_level` でそれぞれのログレベルを個別に設定することもできます。
+**② 検知ログ**（`detect_csv-backup_{Date}.log`）
+
+```
+2026-05-07 10:30:20 │ Create,Modify        │ C:\data\report.csv
+```
+
+**③ アクションログ**（`action_csv-backup_{Date}.log`・1検知=1ブロック、`#N` は日次でリセット）
+
+```
+═══ #1  2026-05-07 10:30:20  C:\data\report.csv  (Create,Modify)  actions=2 ═══
+2026-05-07 10:30:20 │ 1. copy   │ destination=D:\backup\{Date}  overwrite=false
+2026-05-07 10:30:20 │ 1. OK     │ コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
+2026-05-07 10:30:20 │ 2. log    │
+2026-05-07 10:30:20 │ 2. OK     │ 検知: report.csv
+```
+
+アクションが失敗した場合は `1. WARN`（リトライ）→ `1. ERR`（最終失敗）の順に
+**アクションログにのみ** 記録されます（システムログには残りません）。
+`[system_log]` の `console = false` でターミナル出力を、各ログの `enabled = false`
+で個別にファイル出力を無効にできます。
 
 ## Windows サービスとして登録する
 
@@ -306,7 +337,7 @@ sc delete cat-watcher
 
 - `binPath=` の後のパスはすべて **絶対パス** で指定してください（`~` や相対パスは SCM が解釈できません）
 - サービスモードでは **コンソール出力は自動で無効** になり、ファイルログのみ出力されます
-- `global.toml` の `log_to_file = true` と `log_dir` を正しく設定しておく必要があります
+- `global.toml` の `[system_log]`（`enabled` / `dir`）を正しく設定しておく必要があります
 - 通常の CLI 起動（`cat-watcher -g ... -r ...`）の動作は変わりません
 
 ## 開発

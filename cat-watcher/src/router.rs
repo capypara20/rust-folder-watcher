@@ -9,7 +9,7 @@ use notify::EventKind;
 use notify::event::{CreateKind, ModifyKind, RemoveKind};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
-use crate::{config::{ActionConfig, Event, Global, Rule, WatchTarget}, error::AppError};
+use crate::{config::{ActionConfig, Event, RetryConfig, Rule, WatchTarget}, error::AppError};
 use crate::logger::Logger;
 
 /// イベントが指すエントリの種別。
@@ -57,10 +57,11 @@ pub struct CompiledRule{
 	pub dir_regex: Option<Regex>,
 	pub regexes: Option<Regex>,
 	pub actions: Vec<ActionConfig>,
-	pub rule_logger: Option<Arc<Logger>>,
+	pub detect_logger: Option<Arc<Logger>>,
+	pub action_logger: Option<Arc<Logger>>,
 }
 
-pub fn compile_rules(rules: &[Rule], global: &Global) -> Result<(Vec<CompiledRule>, Vec<tokio::task::JoinHandle<()>>), AppError> {
+pub fn compile_rules(rules: &[Rule]) -> Result<(Vec<CompiledRule>, Vec<tokio::task::JoinHandle<()>>), AppError> {
 	let mut compiled_rules = Vec::new();
 	let mut log_handles = Vec::new();
 	for rule in rules{
@@ -130,25 +131,34 @@ pub fn compile_rules(rules: &[Rule], global: &Global) -> Result<(Vec<CompiledRul
 			None
 		};
 		
-		let rule_logger = if let Some(rule_log) = &rule.log {
-			if rule_log.enabled {
-				let log_dir = rule_log.log_dir.clone()
-					.unwrap_or_else(|| global.log_dir.clone());
-				let log_file_name = rule_log.log_file_name.clone()
-					.unwrap_or_else(|| global.log_file_name.clone());
-				let log_rotation = rule_log.log_rotation.clone()
-					.unwrap_or_else(|| global.log_rotation.clone());
-				let file_level = global.file_log_level.clone()
-					.unwrap_or_else(|| global.log_level.clone());
-				let (logger, handle) = Logger::for_rule(log_dir, log_file_name, log_rotation, file_level)?;
-				log_handles.push(handle);
-				Some(Arc::new(logger))
-			} else {
-				None
+		// 検知ログ・アクションログをそれぞれ個別に生成する（global からの
+		// フォールバックは廃止。各ターゲットが dir/file_name/rotation を必須で持つ）。
+		let mut detect_logger = None;
+		let mut action_logger = None;
+		if let Some(rule_log) = &rule.log {
+			if let Some(detect) = &rule_log.detect {
+				if detect.enabled {
+					let (logger, handle) = Logger::for_detect(
+						detect.dir.clone(),
+						detect.file_name.clone(),
+						detect.rotation.clone(),
+					)?;
+					log_handles.push(handle);
+					detect_logger = Some(Arc::new(logger));
+				}
 			}
-		} else {
-			None
-		};
+			if let Some(action) = &rule_log.action {
+				if action.enabled {
+					let (logger, handle) = Logger::for_action(
+						action.dir.clone(),
+						action.file_name.clone(),
+						action.rotation.clone(),
+					)?;
+					log_handles.push(handle);
+					action_logger = Some(Arc::new(logger));
+				}
+			}
+		}
 
 		compiled_rules.push(CompiledRule {
 			name: rule.name.clone(),
@@ -167,7 +177,8 @@ pub fn compile_rules(rules: &[Rule], global: &Global) -> Result<(Vec<CompiledRul
 			dir_regex,
 			regexes,
 			actions: rule.actions.clone(),
-			rule_logger,
+			detect_logger,
+			action_logger,
 		});
 	}
 	Ok((compiled_rules, log_handles))
@@ -323,7 +334,7 @@ fn to_config_event(kind: &EventKind) -> Option<Event> {
 pub async fn run_router(
     mut rx: mpsc::Receiver<notify::Result<notify::Event>>,
     compiled_rules: &[CompiledRule],
-    global: &Global,
+    retry: &RetryConfig,
     log: Arc<Logger>,
 ) -> Result<(), AppError> {
     // デバウンス用マップ: パス → (イベント集合, 最後の受信時刻, EntryKind)
@@ -369,39 +380,40 @@ pub async fn run_router(
                             continue;
                         }
 
+                        // 検知: ターミナル（system）＋検知ログ（ルール別ファイル）へ
                         log.log_match(
                             &rule.name,
                             path.display().to_string(),
                             detected_events.clone(),
                         );
-                        if let Some(rl) = &rule.rule_logger {
-                            rl.log_match(
+                        if let Some(dl) = &rule.detect_logger {
+                            dl.log_match(
                                 &rule.name,
                                 path.display().to_string(),
                                 detected_events.clone(),
                             );
                         }
 
+                        // アクションログのブロック開始セパレータ
+                        if let Some(al) = &rule.action_logger {
+                            al.log_block_start(
+                                path.display().to_string(),
+                                detected_events.clone(),
+                                rule.actions.len(),
+                            );
+                        }
+
                         let watch_path = PathBuf::from(&rule.watch_path);
-                        if let Err(e) = crate::actions::execute_chain(
+                        // アクション失敗時のログ出力は execute_chain 内（ActionSink）で
+                        // 完結する（ターミナル＋アクションログ）。ここでは再ログしない。
+                        let _ = crate::actions::execute_chain(
                             &rule.actions,
                             &path,
                             &watch_path,
-                            global,
+                            retry,
                             Arc::clone(&log),
-                            rule.rule_logger.clone(),
-                        ).await {
-                            log.error(format!(
-                                "アクションチェーン実行エラー: ルール={}, パス={}, エラー={}",
-                                rule.name, path.display(), e
-                            ));
-                            if let Some(rl) = &rule.rule_logger {
-                                rl.error(format!(
-                                    "アクションチェーン実行エラー: パス={}, エラー={}",
-                                    path.display(), e
-                                ));
-                            }
-                        }
+                            rule.action_logger.clone(),
+                        ).await;
                     }
                 }
             }
@@ -447,7 +459,8 @@ mod tests {
             dir_regex: None,
             regexes: None,
             actions: vec![],
-            rule_logger: None,
+            detect_logger: None,
+            action_logger: None,
         }
     }
 

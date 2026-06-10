@@ -94,8 +94,10 @@ impl_case_insensitive_deserialize!(ActionType,
 );
 
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
-    pub global: Global,
+    pub retry: RetryConfig,
+    pub system_log: SystemLogConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -107,31 +109,46 @@ fn default_true() -> bool {
     true
 }
 
+/// リトライ設定（copy / move アクション用）。
 #[derive(Debug, Clone, Deserialize)]
-pub struct Global {
-    pub log_level: LogLevel,
-    pub log_dir: String,
-    pub log_file_name: String,
-    pub log_rotation: LogRotation,
-    pub retry_count: u32,
-    pub retry_interval_ms: u64,
-    #[serde(default = "default_true")]
-    pub log_to_console: bool,
-    #[serde(default = "default_true")]
-    pub log_to_file: bool,
-    /// ターミナル出力専用ログレベル。省略時は log_level を使用。
-    pub terminal_log_level: Option<LogLevel>,
-    /// ファイル出力専用ログレベル。省略時は log_level を使用。
-    pub file_log_level: Option<LogLevel>,
+#[serde(deny_unknown_fields)]
+pub struct RetryConfig {
+    pub count: u32,
+    pub interval_ms: u64,
 }
 
+/// システムログ設定（プログラム全体の起動日誌）。
 #[derive(Debug, Clone, Deserialize)]
-pub struct RuleLog {
+#[serde(deny_unknown_fields)]
+pub struct SystemLogConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
-    pub log_dir: Option<String>,
-    pub log_file_name: Option<String>,
-    pub log_rotation: Option<LogRotation>,
+    pub dir: String,
+    pub file_name: String,
+    pub rotation: LogRotation,
+    pub level: LogLevel,
+    /// コンソール出力 ON/OFF（ターミナル再設計までの暫定置き場）。
+    #[serde(default = "default_true")]
+    pub console: bool,
+}
+
+/// ルール別ログ設定。検知ログ・アクションログをそれぞれ個別指定する。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleLog {
+    pub detect: Option<RuleLogTarget>,
+    pub action: Option<RuleLogTarget>,
+}
+
+/// 検知ログ / アクションログ共通の出力先設定。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RuleLogTarget {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    pub dir: String,
+    pub file_name: String,
+    pub rotation: LogRotation,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -206,7 +223,7 @@ pub fn load_global_config(path: &Path) -> Result<GlobalConfig, AppError> {
 	let content = std::fs::read_to_string(path)?;
 	let mut config: GlobalConfig = toml::from_str(&content)
 							.map_err(|e| AppError::TomlParse(e.to_string()))?;
-	config.global.log_dir = expand_tilde(&config.global.log_dir);
+	config.system_log.dir = expand_tilde(&config.system_log.dir);
 	Ok(config)
 }
 
@@ -221,7 +238,12 @@ pub fn load_rules_config(path: &Path) -> Result<RulesConfig, AppError> {
 			action.working_dir = action.working_dir.as_deref().map(expand_tilde);
 		}
 		if let Some(log) = &mut rule.log {
-			log.log_dir = log.log_dir.as_deref().map(expand_tilde);
+			if let Some(detect) = &mut log.detect {
+				detect.dir = expand_tilde(&detect.dir);
+			}
+			if let Some(action) = &mut log.action {
+				action.dir = expand_tilde(&action.dir);
+			}
 		}
 	}
 	Ok(config)
@@ -241,37 +263,51 @@ fn finish_validation(errors: Vec<String>) -> Result<(), AppError> {
 	Err(AppError::Validation(msg.trim_end().to_string()))
 }
 
-pub fn validate_global_config(config: &GlobalConfig) -> Result<(), AppError> {
-	let mut errors = Vec::new();
-
-	let log_dir = &config.global.log_dir;
-	if log_dir.trim().is_empty() {
-		errors.push("log_dir が空文字列です。ログ出力先ディレクトリを定義してください".to_string());
+/// ログの出力先ディレクトリとファイル名を検証する共通ヘルパ。
+/// `label` はエラーメッセージ内のフィールド名（例: "system_log.dir"）。
+fn validate_log_target(
+	dir: &str,
+	file_name: &str,
+	dir_label: &str,
+	file_label: &str,
+	errors: &mut Vec<String>,
+) {
+	if dir.trim().is_empty() {
+		errors.push(format!("{dir_label} が空文字列です。ログ出力先ディレクトリを定義してください"));
 	} else {
-		let dir_path = Path::new(log_dir);
+		let dir_path = Path::new(dir);
 		if !dir_path.exists() {
-			errors.push(format!("log_dir が存在しません: {}", dir_path.display()));
+			errors.push(format!("{dir_label} が存在しません: {}", dir_path.display()));
 		} else if !dir_path.is_dir() {
-			errors.push(format!("log_dir にディレクトリ以外のパスが指定されています: {}", dir_path.display()));
+			errors.push(format!("{dir_label} にディレクトリ以外のパスが指定されています: {}", dir_path.display()));
 		}
 	}
 
-	let log_file_name = &config.global.log_file_name;
-	if log_file_name.trim().is_empty() {
-		errors.push("log_file_name が空文字列です。ファイル名を定義してください".to_string());
+	if file_name.trim().is_empty() {
+		errors.push(format!("{file_label} が空文字列です。ファイル名を定義してください"));
 	} else {
 		let valid_placeholders = ["Date", "DateTime"];
 		let re = regex::Regex::new(r"\{([A-Za-z]+)\}").unwrap();
-		for caps in re.captures_iter(log_file_name) {
+		for caps in re.captures_iter(file_name) {
 			let name = &caps[1];
 			if !valid_placeholders.contains(&name) {
 				errors.push(format!(
-					"log_file_name に使用できないプレースホルダーがあります: {{{name}}}。使用可能なのは {{Date}} と {{DateTime}} のみです"
+					"{file_label} に使用できないプレースホルダーがあります: {{{name}}}。使用可能なのは {{Date}} と {{DateTime}} のみです"
 				));
 			}
 		}
 	}
+}
 
+pub fn validate_global_config(config: &GlobalConfig) -> Result<(), AppError> {
+	let mut errors = Vec::new();
+	validate_log_target(
+		&config.system_log.dir,
+		&config.system_log.file_name,
+		"system_log.dir",
+		"system_log.file_name",
+		&mut errors,
+	);
 	finish_validation(errors)
 }
 
@@ -377,31 +413,26 @@ pub fn validate_rules_config(config: &RulesConfig) -> Result<(), AppError> {
 		}
 
 		if let Some(rule_log) = &rule.log {
-			if rule_log.enabled {
-				if let Some(dir) = &rule_log.log_dir {
-					let p = Path::new(dir);
-					if !p.exists() {
-						errors.push(format!("監視ルール名 {} の log.log_dir が存在しません: {}", rule_id, dir));
-					} else if !p.is_dir() {
-						errors.push(format!("監視ルール名 {} の log.log_dir にディレクトリ以外のパスが指定されています: {}", rule_id, dir));
-					}
+			if let Some(detect) = &rule_log.detect {
+				if detect.enabled {
+					validate_log_target(
+						&detect.dir,
+						&detect.file_name,
+						&format!("監視ルール名 {} の log.detect.dir", rule_id),
+						&format!("監視ルール名 {} の log.detect.file_name", rule_id),
+						&mut errors,
+					);
 				}
-				if let Some(file_name) = &rule_log.log_file_name {
-					if file_name.trim().is_empty() {
-						errors.push(format!("監視ルール名 {} の log.log_file_name が空文字列です", rule_id));
-					} else {
-						let valid_placeholders = ["Date", "DateTime"];
-						let re = regex::Regex::new(r"\{([A-Za-z]+)\}").unwrap();
-						for caps in re.captures_iter(file_name) {
-							let name = &caps[1];
-							if !valid_placeholders.contains(&name) {
-								errors.push(format!(
-									"監視ルール名 {} の log.log_file_name に使用できないプレースホルダーがあります: {{{name}}}",
-									rule_id
-								));
-							}
-						}
-					}
+			}
+			if let Some(action) = &rule_log.action {
+				if action.enabled {
+					validate_log_target(
+						&action.dir,
+						&action.file_name,
+						&format!("監視ルール名 {} の log.action.dir", rule_id),
+						&format!("監視ルール名 {} の log.action.file_name", rule_id),
+						&mut errors,
+					);
 				}
 			}
 		}
@@ -606,24 +637,31 @@ mod tests {
 	// GlobalConfig パーステスト
 	// =========================================================
 
+	fn make_global_toml(dir_path: &str) -> String {
+		format!(r#"
+			[retry]
+			count = 3
+			interval_ms = 1000
+
+			[system_log]
+			enabled = true
+			dir = "{dir_path}"
+			file_name = "system_{{Date}}.log"
+			rotation = "daily"
+			level = "info"
+			console = true
+		"#)
+	}
+
 	#[test]
 	fn test_parse_global_config() {
 		let dir = tempdir().unwrap();
 		let dir_path = sanitize_path(dir.path());
-		let toml_str = format!(r#"
-			[global]
-			log_level = "info"
-			log_dir = "{dir_path}"
-			log_file_name = "app_{{Date}}.log"
-			log_rotation = "daily"
-			retry_count = 3
-			retry_interval_ms = 1000
-			dry_run = false
-		"#);
-		let config: GlobalConfig = toml::from_str(&toml_str).unwrap();
-		assert_eq!(config.global.retry_count, 3);
-		assert_eq!(config.global.retry_interval_ms, 1000);
-		assert_eq!(config.global.log_dir, dir_path);
+		let config: GlobalConfig = toml::from_str(&make_global_toml(&dir_path)).unwrap();
+		assert_eq!(config.retry.count, 3);
+		assert_eq!(config.retry.interval_ms, 1000);
+		assert_eq!(config.system_log.dir, dir_path);
+		assert!(config.system_log.console);
 	}
 
 	#[test]
@@ -632,17 +670,18 @@ mod tests {
 		let dir_path = sanitize_path(dir.path());
 		for level in &["trace", "debug", "info", "warn", "error"] {
 			let toml_str = format!(r#"
-				[global]
-				log_level = "{level}"
-				log_dir = "{dir_path}"
-				log_file_name = "app.log"
-				log_rotation = "daily"
-				retry_count = 1
-				retry_interval_ms = 500
-				dry_run = false
+				[retry]
+				count = 1
+				interval_ms = 500
+
+				[system_log]
+				dir = "{dir_path}"
+				file_name = "system.log"
+				rotation = "daily"
+				level = "{level}"
 			"#);
 			let result: Result<GlobalConfig, _> = toml::from_str(&toml_str);
-			assert!(result.is_ok(), "log_level '{}' のパースに失敗", level);
+			assert!(result.is_ok(), "level '{}' のパースに失敗", level);
 		}
 	}
 
@@ -651,27 +690,66 @@ mod tests {
 		let dir = tempdir().unwrap();
 		let dir_path = sanitize_path(dir.path());
 		let toml_str = format!(r#"
-			[global]
-			log_level = "verbose"
-			log_dir = "{dir_path}"
-			log_file_name = "app.log"
-			log_rotation = "daily"
-			retry_count = 1
-			retry_interval_ms = 500
-			dry_run = false
+			[retry]
+			count = 1
+			interval_ms = 500
+
+			[system_log]
+			dir = "{dir_path}"
+			file_name = "system.log"
+			rotation = "daily"
+			level = "verbose"
 		"#);
 		let result: Result<GlobalConfig, _> = toml::from_str(&toml_str);
 		assert!(result.is_err());
 	}
 
 	#[test]
-	fn test_parse_global_config_missing_field() {
+	fn test_parse_global_config_missing_section() {
+		// system_log セクション自体が無い場合はエラー
+		let toml_str = r#"
+			[retry]
+			count = 1
+			interval_ms = 500
+		"#;
+		let result: Result<GlobalConfig, _> = toml::from_str(toml_str);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_parse_global_config_rejects_legacy_global_section() {
+		// 旧 [global] 形式は deny_unknown_fields で明示エラーになる
 		let toml_str = r#"
 			[global]
 			log_level = "info"
 			log_dir = "logs"
+			log_file_name = "app.log"
+			log_rotation = "daily"
+			retry_count = 3
+			retry_interval_ms = 1000
 		"#;
 		let result: Result<GlobalConfig, _> = toml::from_str(toml_str);
+		assert!(result.is_err());
+	}
+
+	#[test]
+	fn test_parse_global_config_rejects_unknown_key() {
+		// system_log に未知キー（旧 log_to_file 等）があればエラー
+		let dir = tempdir().unwrap();
+		let dir_path = sanitize_path(dir.path());
+		let toml_str = format!(r#"
+			[retry]
+			count = 1
+			interval_ms = 500
+
+			[system_log]
+			dir = "{dir_path}"
+			file_name = "system.log"
+			rotation = "daily"
+			level = "info"
+			log_to_file = true
+		"#);
+		let result: Result<GlobalConfig, _> = toml::from_str(&toml_str);
 		assert!(result.is_err());
 	}
 
@@ -679,107 +757,51 @@ mod tests {
 	// GlobalConfig バリデーションテスト
 	// =========================================================
 
+	fn make_global(dir: &str, file_name: &str) -> GlobalConfig {
+		GlobalConfig {
+			retry: RetryConfig { count: 3, interval_ms: 1000 },
+			system_log: SystemLogConfig {
+				enabled: true,
+				dir: dir.to_string(),
+				file_name: file_name.to_string(),
+				rotation: LogRotation::Daily,
+				level: LogLevel::Info,
+				console: true,
+			},
+		}
+	}
+
 	#[test]
 	fn test_validate_global_config_empty_log_dir() {
-		let config = GlobalConfig {
-			global: Global {
-				log_level: LogLevel::Info,
-				log_dir: "   ".to_string(),
-				log_file_name: "app.log".to_string(),
-				log_rotation: LogRotation::Daily,
-				retry_count: 3,
-				retry_interval_ms: 1000,
-				log_to_console: true,
-				log_to_file: true,
-				terminal_log_level: None,
-				file_log_level: None,
-			},
-		};
-		let result = validate_global_config(&config);
-		assert!(result.is_err());
+		let config = make_global("   ", "app.log");
+		assert!(validate_global_config(&config).is_err());
 	}
 
 	#[test]
 	fn test_validate_global_config_dir_not_exist() {
-		let config = GlobalConfig {
-			global: Global {
-				log_level: LogLevel::Info,
-				log_dir: "nonexistent_dir_xyz_12345".to_string(),
-				log_file_name: "app.log".to_string(),
-				log_rotation: LogRotation::Daily,
-				retry_count: 3,
-				retry_interval_ms: 1000,
-				log_to_console: true,
-				log_to_file: true,
-				terminal_log_level: None,
-				file_log_level: None,
-			},
-		};
-		let result = validate_global_config(&config);
-		assert!(result.is_err());
+		let config = make_global("nonexistent_dir_xyz_12345", "app.log");
+		assert!(validate_global_config(&config).is_err());
 	}
 
 	#[test]
 	fn test_validate_global_config_empty_file_name() {
 		let dir = tempdir().unwrap();
-		let config = GlobalConfig {
-			global: Global {
-				log_level: LogLevel::Info,
-				log_dir: dir.path().to_str().unwrap().to_string(),
-				log_file_name: "  ".to_string(),
-				log_rotation: LogRotation::Daily,
-				retry_count: 3,
-				retry_interval_ms: 1000,
-				log_to_console: true,
-				log_to_file: true,
-				terminal_log_level: None,
-				file_log_level: None,
-			},
-		};
-		let result = validate_global_config(&config);
-		assert!(result.is_err());
+		let config = make_global(dir.path().to_str().unwrap(), "  ");
+		assert!(validate_global_config(&config).is_err());
 	}
 
 	#[test]
 	fn test_validate_global_config_invalid_placeholder_in_file_name() {
 		let dir = tempdir().unwrap();
-		let config = GlobalConfig {
-			global: Global {
-				log_level: LogLevel::Info,
-				log_dir: dir.path().to_str().unwrap().to_string(),
-				log_file_name: "app_{Name}.log".to_string(),
-				log_rotation: LogRotation::Daily,
-				retry_count: 3,
-				retry_interval_ms: 1000,
-				log_to_console: true,
-				log_to_file: true,
-				terminal_log_level: None,
-				file_log_level: None,
-			},
-		};
-		let result = validate_global_config(&config);
-		assert!(result.is_err());
+		let config = make_global(dir.path().to_str().unwrap(), "app_{Name}.log");
+		assert!(validate_global_config(&config).is_err());
 	}
 
 	#[test]
 	fn test_validate_global_config_valid() {
 		let dir = tempdir().unwrap();
-		let config = GlobalConfig {
-			global: Global {
-				log_level: LogLevel::Info,
-				log_dir: dir.path().to_str().unwrap().to_string(),
-				log_file_name: "app_{Date}.log".to_string(),
-				log_rotation: LogRotation::Daily,
-				retry_count: 3,
-				retry_interval_ms: 1000,
-				log_to_console: true,
-				log_to_file: true,
-				terminal_log_level: None,
-				file_log_level: None,
-			},
-		};
-		let result = validate_global_config(&config);
-		assert!(result.is_ok());
+		let config = make_global(dir.path().to_str().unwrap(), "app_{Date}.log");
+		assert!(validate_global_config(&config).is_ok());
 	}
 
 	// =========================================================
@@ -1986,5 +2008,52 @@ mod tests {
 		assert_eq!(config.rules.len(), 2);
 		let result = validate_rules_config(&config);
 		assert!(result.is_ok());
+	}
+
+	// =========================================================
+	// テンプレート TOML パーステスト
+	// Windows バックスラッシュパスが TOML として正しくパースできること
+	// =========================================================
+
+	#[test]
+	fn test_global_template_is_valid_toml() {
+		use crate::templates::GLOBAL_TOML;
+		let result = toml::from_str::<toml::Value>(GLOBAL_TOML);
+		assert!(
+			result.is_ok(),
+			"GLOBAL_TOML テンプレートが TOML としてパースできません: {:?}",
+			result.err()
+		);
+	}
+
+	#[test]
+	fn test_global_template_windows_path_preserved() {
+		use crate::templates::GLOBAL_TOML;
+		let val: toml::Value = toml::from_str(GLOBAL_TOML).unwrap();
+		let dir = val["system_log"]["dir"].as_str().unwrap();
+		assert_eq!(dir, r"C:\logs", "system_log.dir のパスが正しく保持されていません");
+	}
+
+	#[test]
+	fn test_rules_template_is_valid_toml() {
+		use crate::templates::RULES_TOML;
+		let result = toml::from_str::<toml::Value>(RULES_TOML);
+		assert!(
+			result.is_ok(),
+			"RULES_TOML テンプレートが TOML としてパースできません: {:?}",
+			result.err()
+		);
+	}
+
+	#[test]
+	fn test_rules_template_windows_path_preserved() {
+		use crate::templates::RULES_TOML;
+		let val: toml::Value = toml::from_str(RULES_TOML).unwrap();
+		let path = val["rules"][0]["watch"]["path"].as_str().unwrap();
+		assert_eq!(path, r"C:\監視フォルダ", "rules[0].watch.path のパスが正しく保持されていません");
+		let detect_dir = val["rules"][0]["log"]["detect"]["dir"].as_str().unwrap();
+		assert_eq!(detect_dir, r"C:\logs", "rules[0].log.detect.dir のパスが正しく保持されていません");
+		let action_dir = val["rules"][0]["log"]["action"]["dir"].as_str().unwrap();
+		assert_eq!(action_dir, r"C:\logs", "rules[0].log.action.dir のパスが正しく保持されていません");
 	}
 }

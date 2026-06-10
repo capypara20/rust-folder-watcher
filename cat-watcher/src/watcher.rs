@@ -5,7 +5,7 @@ use std::sync::Arc;
 use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 
-use crate::config::{Global, Rule};
+use crate::config::{RetryConfig, Rule};
 use crate::error::AppError;
 use crate::logger::Logger;
 
@@ -25,7 +25,7 @@ fn strip_unc_prefix(path: &PathBuf) -> String {
 
 pub async fn start_watching(
     rules: &[Rule],
-    global: &Global,
+    retry: &RetryConfig,
     log: Arc<Logger>,
 ) -> Result<(), AppError> {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>(100);
@@ -37,10 +37,6 @@ pub async fn start_watching(
 
     let mut watch_map: HashMap<PathBuf, RecursiveMode> = HashMap::new();
     for rule in rules {
-        if !rule.enabled {
-            continue;
-        }
-
         let path = PathBuf::from(&rule.watch.path);
         let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
         let canonical_display = strip_unc_prefix(&canonical);
@@ -64,14 +60,21 @@ pub async fn start_watching(
             .join(", ");
 
         let recursive_str = if rule.watch.recursive { "あり" } else { "なし" };
+        let status = if rule.enabled { "有効" } else { "無効" };
 
         log.info(format!(
-            "監視ルール [{}]  パス={}  イベント={}  サブフォルダ={}",
+            "監視ルール [{}] ({})  パス={}  イベント={}  サブフォルダ={}",
             rule.name,
+            status,
             canonical_display,
             events_str,
             recursive_str,
         ));
+
+        // 無効ルールは一覧に記載するだけで、フィルタ詳細表示と監視登録は行わない。
+        if !rule.enabled {
+            continue;
+        }
 
         // 包含ファイルフィルタ
         if let Some(pats) = &rule.watch.patterns {
@@ -117,13 +120,16 @@ pub async fn start_watching(
         })?;
     }
 
-    let (compiled_rules, rule_log_handles) = crate::router::compile_rules(rules, global)?;
-    crate::router::run_router(rx, &compiled_rules, global, Arc::clone(&log)).await?;
+    let (compiled_rules, rule_log_handles) = crate::router::compile_rules(rules)?;
+    crate::router::run_router(rx, &compiled_rules, retry, Arc::clone(&log)).await?;
 
-    // ルール別ロガーをシャットダウン
+    // ルール別ロガー（検知・アクション）をシャットダウン
     for rule in &compiled_rules {
-        if let Some(rl) = &rule.rule_logger {
-            rl.shutdown();
+        if let Some(dl) = &rule.detect_logger {
+            dl.shutdown();
+        }
+        if let Some(al) = &rule.action_logger {
+            al.shutdown();
         }
     }
     for handle in rule_log_handles {
