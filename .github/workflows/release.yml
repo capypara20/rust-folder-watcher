@@ -5,6 +5,12 @@ on:
     branches:
       - main
 
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   tag:
     name: タグ作成
@@ -13,7 +19,7 @@ jobs:
       contents: write
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
-      created: ${{ steps.tag.outputs.created }}
+      should_release: ${{ steps.tag.outputs.should_release }}
 
     steps:
       - name: チェックアウト
@@ -25,23 +31,30 @@ jobs:
           VERSION=$(grep '^version' cat-watcher/Cargo.toml | head -1 | sed 's/.*= *"\(.*\)"/\1/')
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
-      - name: タグが未作成なら作成
+      - name: リリースが未作成ならタグを用意
         id: tag
         uses: actions/github-script@v7
         with:
           script: |
             const tag = `v${{ steps.version.outputs.version }}`;
+            core.setOutput('tag', tag);
+
+            // リリースの有無で判定する（タグの有無で判定すると、タグ作成後に
+            // ビルドが失敗した場合、再実行してもスキップされ復旧できないため）
             try {
-              await github.rest.git.getRef({
+              await github.rest.repos.getReleaseByTag({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                ref: `tags/${tag}`,
+                tag,
               });
-              console.log(`タグ ${tag} は既に存在するためスキップします。`);
-              core.setOutput('tag', tag);
-              core.setOutput('created', 'false');
+              console.log(`リリース ${tag} は既に存在するためスキップします。`);
+              core.setOutput('should_release', 'false');
+              return;
             } catch (e) {
               if (e.status !== 404) throw e;
+            }
+
+            try {
               await github.rest.git.createRef({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
@@ -49,16 +62,19 @@ jobs:
                 sha: context.sha,
               });
               console.log(`タグ ${tag} を作成しました。`);
-              core.setOutput('tag', tag);
-              core.setOutput('created', 'true');
+            } catch (e) {
+              if (e.status !== 422) throw e; // 422 = タグが既に存在
+              console.log(`タグ ${tag} は作成済み（リリース未作成）のため続行します。`);
             }
+            core.setOutput('should_release', 'true');
 
   build:
     name: ビルド (${{ matrix.name }})
     needs: tag
-    if: needs.tag.outputs.created == 'true'
+    if: needs.tag.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - name: Windows x86_64
@@ -83,18 +99,10 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: cargo キャッシュ
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+        uses: Swatinem/rust-cache@v2
 
       - name: リリースバイナリのビルド
-        run: cargo build --release --target ${{ matrix.target }} --manifest-path cat-watcher/Cargo.toml
+        run: cargo build --release --locked --target ${{ matrix.target }} --manifest-path cat-watcher/Cargo.toml
 
       - name: アーティファクトのアップロード
         uses: actions/upload-artifact@v4
@@ -106,7 +114,7 @@ jobs:
   release:
     name: GitHub リリース作成
     needs: [tag, build]
-    if: needs.tag.outputs.created == 'true'
+    if: needs.tag.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: write
