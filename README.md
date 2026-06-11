@@ -4,24 +4,68 @@
 
 設定は TOML で書き、Excel で管理したいときは CSV からも生成できます。Windows / Linux 用のバイナリを GitHub Releases から配布しています。
 
+## 目次
+
+- [対応プラットフォーム](#対応プラットフォーム)
+- [主な機能](#主な機能)
+- [インストール](#インストール)
+- [クイックスタート](#クイックスタート)
+- [設定リファレンス](#設定リファレンス)
+  - [global.toml（グローバル設定）](#globaltomlグローバル設定)
+  - [rules.toml（ルール定義）](#rulestomlルール定義)
+- [フィルタ設定](#フィルタ設定)
+- [アクションの種類](#アクションの種類)
+- [プレースホルダー](#プレースホルダー)
+- [検知の動作仕様](#検知の動作仕様)
+- [プラットフォーム別の仕様](#プラットフォーム別の仕様)
+- [ログ](#ログ)
+- [常駐化（サービス登録）](#常駐化サービス登録)
+- [バリデーション](#バリデーション)
+- [CSV からの変換](#csv-からの変換)
+- [開発](#開発)
+- [ドキュメント](#ドキュメント)
+
+## 対応プラットフォーム
+
+| | Windows | Linux |
+|---|---|---|
+| 配布バイナリ | `cat-watcher.exe`（x86_64） | `cat-watcher`（x86_64） |
+| 監視バックエンド | `ReadDirectoryChangesExW`（Win10 1709+ / Server 2019+、ローカル NTFS）<br>それ以外は `ReadDirectoryChangesW` にフォールバック | `inotify` |
+| ネットワークパス | UNC パス（`\\server\share`）対応 ※[制約あり](#プラットフォーム別の仕様) | OS のファイル変更通知に依存（NFS 等は非保証） |
+| `command` のシェル | `cmd` / `powershell` / `pwsh` | `bash` / `sh` / `pwsh` |
+| 常駐化 | Windows サービス（`sc create`） | systemd 等の汎用サービス管理 |
+
+> macOS もソースビルドで動作します（シェルは Linux と同じ）が、バイナリ配布と動作検証の対象外です。
+
 ## 主な機能
 
-- **リアルタイム監視**: 指定フォルダの create / modify / delete / rename を検知
-- **対称設計フィルタ**: ファイル名・フォルダ名 × 包含・除外 × glob・regex の 2×2×2 = 8 通りのフィルタを自由に組み合わせ可能
-- **5 種類のアクション**: log / copy / move / command（シェル経由）/ execute（プロセス直接起動）
-- **クロスプラットフォームシェル**: Windows は `cmd` / `powershell` / `pwsh`、Linux・macOS は `bash` / `sh` / `pwsh` に対応
-- **アクションチェーン**: 1 ルールに複数アクションを順次実行（直前のコピー先を `{Destination}` で参照可能）
-- **プレースホルダー**: 監視ファイルのパス・名前・日時などを宛先や引数に埋め込める
-- **整合性検証**: BLAKE3 ハッシュでコピー後のファイル一致を確認
-- **リトライ機構**: ロック等で失敗したアクションを自動再試行
-- **ログ3分割**: システムログ（全体の起動日誌）／検知ログ／アクションログを目的別に分離
-- **ログローテーション**: 日次でログファイルを切り替え（`rotation = "never"` で固定ファイルにも対応）
-- **ルール別ログ**: ルールごとに検知ログ・アクションログを独立出力（`[rules.log.detect]` / `[rules.log.action]` で設定）
-- **テンプレート生成**: `--init global rules csv` のように複数のテンプレートを一括で出力できる
-- **ホームディレクトリ展開**: パス設定で `~` が使用可能（`~/logs` など）
-- **全件エラー報告**: 設定ファイルに複数の問題があっても、1 回の起動で全エラーをまとめて表示
-- **大文字小文字不区別**: 設定値は `create` / `Create` / `CREATE` のいずれでも動作
-- **CSV → TOML 変換**: Excel で書いたルールを TOML に変換する `--from-csv` モード
+**監視・フィルタ**
+
+- 指定フォルダの create / modify / delete / rename をリアルタイム検知（サブフォルダの再帰監視可）
+- 対称設計フィルタ: ファイル名・フォルダ名 × 包含・除外 × glob・regex の 2×2×2 = 8 通りを自由に組み合わせ可能
+- 監視対象の種別指定: `target = "file" / "directory" / "both"`
+
+**アクション**
+
+- 5 種類のアクション: log / copy / move / command（シェル経由）/ execute（プロセス直接起動）
+- アクションチェーン: 1 ルールに複数アクションを順次実行（直前のコピー先を `{Destination}` で参照可能）
+- プレースホルダー: 監視ファイルのパス・名前・日時などを宛先や引数に埋め込み
+- 整合性検証: BLAKE3 ハッシュでコピー後のファイル一致を確認
+- リトライ機構: ロック等で失敗したアクションを自動再試行
+
+**ログ・運用**
+
+- ログ 3 分割: システムログ（全体の起動日誌）／検知ログ／アクションログを目的別に分離
+- ログローテーション: 日次切り替え（`rotation = "never"` で固定ファイルにも対応）
+- ルール別ログ: ルールごとに検知ログ・アクションログを独立出力
+- 全件エラー報告: 設定に複数の問題があっても 1 回の起動で全エラーをまとめて表示
+
+**設定まわり**
+
+- テンプレート生成: `--init global rules csv` で複数テンプレートを一括出力
+- CSV → TOML 変換: Excel で書いたルールを TOML に変換する `--from-csv` モード
+- ホームディレクトリ展開: パス設定で `~` が使用可能（`~/logs` など）
+- 設定値の大文字小文字不区別: `create` / `Create` / `CREATE` のいずれでも動作
 
 ## インストール
 
@@ -33,12 +77,10 @@
 ソースからビルドする場合：
 
 ```bash
-cargo build --release --manifest-path cat-watcher/Cargo.toml
+cargo build --release --locked --manifest-path cat-watcher/Cargo.toml
 ```
 
-## 使い方
-
-### 基本
+## クイックスタート
 
 ```bash
 # 設定ファイルのテンプレートを生成（まずここから）
@@ -66,6 +108,8 @@ cat-watcher --from-csv rules.csv --output rules.toml
 ```
 
 引数なしで起動すると使い方のガイドが表示されます。
+
+## 設定リファレンス
 
 ### global.toml（グローバル設定）
 
@@ -102,7 +146,7 @@ name    = "csv-backup"
 path             = "C:\\data\\incoming"      # ~ によるホームディレクトリ展開も可（例: ~/data）
 recursive        = true
 target           = "file"                # file / directory / both
-include_hidden   = false
+include_hidden   = false                 # ※現バージョンでは未実装（値は無視される）
 patterns         = ["*.csv", "*.xlsx"]   # glob（regex と排他）
 # regex          = ".*\\.csv$"           # 正規表現（patterns と排他）
 exclude_patterns = ["temp_*"]            # glob（exclude_regex と排他）
@@ -151,7 +195,7 @@ working_dir = ""
 
 ## フィルタ設定
 
-ファイル名・フォルダ名それぞれに包含・除外フィルタを設定できます。各カテゴリで **glob と regex は排他**（両方設定するとバリデーションエラー）。
+ファイル名・フォルダ名それぞれに包含・除外フィルタを設定できます。各カテゴリで **glob と regex は排他**（両方設定するとバリデーションエラー）。glob / regex とも **大文字小文字を区別** します。
 
 | | ファイル名 | フォルダ名 |
 |---|---|---|
@@ -201,9 +245,15 @@ exclude_dir_patterns = ["node_modules"]  # ただし node_modules は除外
 |------|------|----------------|
 | `log`     | イベントをログファイルに記録するだけ（コマンド実行なし） | `message` |
 | `copy`    | ファイル / ディレクトリをコピー | `destination`, `overwrite`, `preserve_structure`, `verify_integrity` |
-| `move`    | ファイル / ディレクトリを移動（異ボリュームは copy + delete にフォールバック） | `destination`, `overwrite`, `preserve_structure`, `verify_integrity` |
+| `move`    | ファイル / ディレクトリを移動 | `destination`, `overwrite`, `preserve_structure`, `verify_integrity` |
 | `command` | シェル経由でコマンド実行 | `shell`（Windows: `cmd` / `powershell` / `pwsh`、Linux: `bash` / `sh` / `pwsh`）, `command`, `working_dir` |
 | `execute` | プログラムを直接起動 | `program`, `args`, `working_dir` |
+
+### move の動作
+
+1. まず OS の rename（同一ボリューム内の移動）を試みます
+2. 移動先が別ボリューム（別ドライブ・別マウント）の場合は、**copy + 元ファイル削除** に自動フォールバックします（`verify_integrity = true` ならコピー後に BLAKE3 で検証してから元ファイルを削除）
+3. `overwrite = false` で移動先に同名ファイルが存在する場合はスキップし、元ファイルは保持されます
 
 ## プレースホルダー
 
@@ -211,52 +261,66 @@ exclude_dir_patterns = ["node_modules"]  # ただし node_modules は除外
 
 | プレースホルダー | 内容 | 例 |
 |----------------|------|----|
-| `{FullName}`      | ファイルのフルパス | `C:\data\report.csv` |
-| `{Name}`          | ファイル名（拡張子なし） | `report` |
-| `{BaseName}`      | ファイル名（拡張子あり） | `report.csv` |
-| `{Extension}`     | 拡張子 | `.csv` |
-| `{DirectoryName}` | 親ディレクトリのフルパス | `C:\data` |
-| `{WatchPath}`     | 監視ルートパス | `C:\data` |
-| `{RelativePath}`  | 監視ルートからの相対パス | `sub\report.csv` |
-| `{Date}`          | 検知日 | `20240302` |
-| `{Time}`          | 検知時刻 | `103020` |
-| `{DateTime}`      | 日時 | `20240302_103020` |
+| `{FullName}`      | ファイルのフルパス | `C:/data/report.csv` |
+| `{DirectoryName}` | 親ディレクトリのフルパス | `C:/data` |
+| `{Name}`          | ファイル名（拡張子あり） | `report.csv` |
+| `{BaseName}`      | ファイル名（拡張子なし） | `report` |
+| `{Extension}`     | 拡張子（ドットなし） | `csv` |
+| `{RelativePath}`  | 監視ルートからの相対パス | `sub/report.csv` |
+| `{WatchPath}`     | 監視ルートパス | `C:/data` |
 | `{Destination}`   | 直前のアクションの出力先（チェーン用） | コピー後のフルパス |
+| `{Date}`          | 検知日（YYYYMMDD） | `20240302` |
+| `{Time}`          | 検知時刻（HHmmss） | `103020` |
+| `{DateTime}`      | 日時（YYYYMMDD_HHmmss） | `20240302_103020` |
 
-## バリデーション
+- パス系のプレースホルダーは **Windows でも `/` 区切りに正規化** されます（`C:\data\report.csv` → `C:/data/report.csv`）。コマンドに渡す際に `\` 区切りが必要な場合は注意してください
+- `{` `}` をそのまま出力したい場合は `{{` `}}` とエスケープします
+- 未知のプレースホルダーは設定読み込み時のバリデーションでエラーになります
 
-`--validate` フラグを付けると、設定ファイルの妥当性チェックのみ実行して終了します。複数の問題があるときはすべて一覧で表示されます。
+## 検知の動作仕様
 
-```
-バリデーションエラーが 3 件見つかりました:
-  [1] system_log.dir が存在しません: C:\logs\app
-  [2] 監視ルール名 csv-backup の watch.path が存在しません: C:\data\incoming
-  [3] 監視ルール名 log-processor のアクションの type が Command のとき、shell を定義してください
-```
+Windows / Linux 共通の挙動です。
 
-## CSV からの変換
+- **イベントの集約（デバウンス）**: 同一パスへの連続イベントは集約され、**最後のイベントから 500ms 静止した時点** で評価・アクション実行されます。エディタの保存やコピー中の書き込みで modify が連発しても、アクションは 1 回にまとまります
+- **events の判定**: 集約されたイベント集合とルールの `events` に 1 つでも共通があればマッチします（検知ログには `Create,Modify` のように集約結果がすべて記録されます）
+- **rename の扱い**: OS からのリネーム通知は `rename` イベントとして扱われます。リネームでは旧パス・新パスそれぞれでイベントが発生することがあります
+- **target の判定**: `create` / `delete` は OS の通知に含まれる種別（ファイル / フォルダ）で判定します。`modify` / `rename` はパスの実体を確認して判定します（[旧 Windows の制約](#プラットフォーム別の仕様) を参照）
 
-CSV の列順（1 行目はヘッダー、自動でスキップ）：
-** 未検証... **
+## プラットフォーム別の仕様
 
-```
-rule_name, enabled, watch_path, recursive, target, include_hidden,
-patterns, regex, exclude_patterns, exclude_regex,
-dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex, events,
-action_type, destination, overwrite, preserve_structure, verify_integrity,
-shell, command, program, args, working_dir, message
-```
+### Windows
 
-- 同じ `rule_name` の行を複数並べると、1 ルールに複数アクションを定義できます
-- 配列フィールド（`patterns` / `events` / `args` 等）は `|` 区切り（例: `create|modify`）
-- `log` アクションは `action_type = "log"` とし、`message` 列にメッセージを記入します
+| 項目 | 内容 |
+|---|---|
+| 監視 API | **Windows 10 1709 / Server 2019 以降 + ローカル NTFS**: `ReadDirectoryChangesExW`。作成・削除イベントでファイル / フォルダの種別が通知される |
+| フォールバック | **UNC（ネットワーク）パス・非 NTFS・旧 Windows**（Win10 1709 未満 / Server 2016 等）: `ReadDirectoryChangesW` |
+| UNC パス | `\\server\share` 形式に対応。ただし SMB 環境で OS レベルのファイル変更通知が届かない場合は動作保証外 |
+| シェル | `command` アクションは `cmd` / `powershell` / `pwsh` |
+| 常駐化 | Windows サービスとして登録可能（[後述](#windows-サービス)） |
 
-`--init csv` でヘッダー付きのサンプル CSV を生成できます。
+> **旧 Windows / UNC パスでの削除検知の制約**: フォールバック時は削除イベントで
+> ファイル / フォルダの種別が通知されず、削除後はパスの実体も確認できないため、
+> `target = "file"` / `"directory"` のルールでは **delete イベントを検知できません**。
+> この環境で削除を確実に拾いたい場合は `target = "both"` を使ってください。
+
+### Linux
+
+| 項目 | 内容 |
+|---|---|
+| 監視 API | `inotify`。作成・削除イベントでファイル / フォルダの種別が通知される（上記の制約なし） |
+| 再帰監視の上限 | `recursive = true` はサブディレクトリごとに inotify ウォッチを登録するため、大規模ツリーでは `fs.inotify.max_user_watches` の引き上げが必要になる場合あり |
+| ネットワーク FS | NFS / CIFS マウント等では inotify 通知が届かないことがあり、動作保証外 |
+| シェル | `command` アクションは `bash` / `sh` / `pwsh`（`pwsh` は PowerShell インストール時のみ） |
+| 常駐化 | systemd 等の汎用サービス管理で常駐（[後述](#linux-systemd)） |
+
+### 共通
+
+- `~` のホームディレクトリ展開は `HOME` → `USERPROFILE` の順で解決されます（Windows でも `~/logs` と書けます）
+- 設定ファイル内のパスは `C:\\data`（エスケープ）/ `C:/data` のどちらの区切りでも書けます
 
 ## ログ
 
-ログは目的別に **3 種類** に分かれます。ターミナルにはこれまで同様すべてが
-色付きで流れますが、ファイルは用途ごとに分割されます。
+ログは目的別に **3 種類** に分かれます。ターミナルにはすべてが色付きで流れますが、ファイルは用途ごとに分割されます。
 
 | 種類 | 出力先 | 内容 |
 |---|---|---|
@@ -304,11 +368,11 @@ shell, command, program, args, working_dir, message
 `[system_log]` の `console = false` でターミナル出力を、各ログの `enabled = false`
 で個別にファイル出力を無効にできます。
 
-## Windows サービスとして登録する
+## 常駐化（サービス登録）
+
+### Windows サービス
 
 `cat-watcher.exe` は Windows サービスとして登録・常駐できます。OS 起動時に自動で監視を開始したい場合に使います。
-
-### 登録手順
 
 管理者権限のコマンドプロンプト（または PowerShell）で実行してください。
 
@@ -324,33 +388,90 @@ sc start cat-watcher
 
 :: サービスの状態を確認
 sc query cat-watcher
-```
 
-### 停止・削除
-
-```cmd
+:: 停止・削除
 sc stop cat-watcher
 sc delete cat-watcher
 ```
 
-### 注意事項
+注意事項:
 
 - `binPath=` の後のパスはすべて **絶対パス** で指定してください（`~` や相対パスは SCM が解釈できません）
 - サービスモードでは **コンソール出力は自動で無効** になり、ファイルログのみ出力されます
 - `global.toml` の `[system_log]`（`enabled` / `dir`）を正しく設定しておく必要があります
 - 通常の CLI 起動（`cat-watcher -g ... -r ...`）の動作は変わりません
 
+### Linux (systemd)
+
+Linux には専用のサービスモードはなく、通常のフォアグラウンドプロセスとして動作するため、systemd のユニットファイルで常駐させます。
+
+`/etc/systemd/system/cat-watcher.service`:
+
+```ini
+[Unit]
+Description=cat-watcher folder watcher
+After=network.target
+
+[Service]
+ExecStart=/opt/cat-watcher/cat-watcher --global /opt/cat-watcher/global.toml --rules /opt/cat-watcher/rules.toml
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now cat-watcher
+systemctl status cat-watcher
+```
+
+- パスは絶対パスで指定してください（`~` 展開はユニット内では使えません）
+- コンソール出力（`console = true`）は journald に記録されます。ファイルログと二重に残したくない場合は `console = false` にしてください
+
+## バリデーション
+
+`--validate` フラグを付けると、設定ファイルの妥当性チェックのみ実行して終了します。複数の問題があるときはすべて一覧で表示されます。
+
+```
+バリデーションエラーが 3 件見つかりました:
+  [1] system_log.dir が存在しません: C:\logs\app
+  [2] 監視ルール名 csv-backup の watch.path が存在しません: C:\data\incoming
+  [3] 監視ルール名 log-processor のアクションの type が Command のとき、shell を定義してください
+```
+
+## CSV からの変換
+
+CSV の列順（1 行目はヘッダー、自動でスキップ）：
+** 未検証... **
+
+```
+rule_name, enabled, watch_path, recursive, target, include_hidden,
+patterns, regex, exclude_patterns, exclude_regex,
+dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex, events,
+action_type, destination, overwrite, preserve_structure, verify_integrity,
+shell, command, program, args, working_dir, message
+```
+
+- 同じ `rule_name` の行を複数並べると、1 ルールに複数アクションを定義できます
+- 配列フィールド（`patterns` / `events` / `args` 等）は `|` 区切り（例: `create|modify`）
+- `log` アクションは `action_type = "log"` とし、`message` 列にメッセージを記入します
+
+`--init csv` でヘッダー付きのサンプル CSV を生成できます。
+
 ## 開発
 
 ```bash
 # テスト
-cargo test --manifest-path cat-watcher/Cargo.toml
+cargo test --locked --manifest-path cat-watcher/Cargo.toml
 
 # リリースビルド
-cargo build --release --manifest-path cat-watcher/Cargo.toml
+cargo build --release --locked --manifest-path cat-watcher/Cargo.toml
 ```
 
-`main` への push で `.github/workflows/release.yml` が走り、`Cargo.toml` のバージョンを元に `vX.Y.Z` タグを作成し、Windows / Linux のバイナリを GitHub Releases に公開します。
+CI（`.github/workflows/ci.yml`）は main 以外のブランチへのプッシュと PR で、Ubuntu / Windows 上のテストを実行します。
+
+`main` への push で `.github/workflows/release.yml` が走り、`Cargo.toml` のバージョンを元に `vX.Y.Z` タグを作成し、Windows / Linux のバイナリを GitHub Releases に公開します（同バージョンのリリースが既にある場合はスキップ）。
 
 ## ドキュメント
 
