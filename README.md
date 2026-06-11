@@ -294,7 +294,7 @@ Windows / Linux 共通の挙動です。
 |---|---|
 | 監視 API | **Windows 10 1709 / Server 2019 以降 + ローカル NTFS**: `ReadDirectoryChangesExW`。作成・削除イベントでファイル / フォルダの種別が通知される |
 | フォールバック | **UNC（ネットワーク）パス・非 NTFS・旧 Windows**（Win10 1709 未満 / Server 2016 等）: `ReadDirectoryChangesW` |
-| UNC パス | `\\server\share` 形式に対応。ただし SMB 環境で OS レベルのファイル変更通知が届かない場合は動作保証外 |
+| UNC パス | `\\server\share` 形式に対応。ただし SMB 環境で OS レベルのファイル変更通知が届かない場合は動作保証外。**サービス起動時は実行アカウントの制約あり**（[常駐化の注意事項](#windows-サービス) を参照） |
 | シェル | `command` アクションは `cmd` / `powershell` / `pwsh` |
 | 常駐化 | Windows サービスとして登録可能（[後述](#windows-サービス)） |
 
@@ -400,6 +400,20 @@ sc delete cat-watcher
 - サービスモードでは **コンソール出力は自動で無効** になり、ファイルログのみ出力されます
 - `global.toml` の `[system_log]`（`enabled` / `dir`）を正しく設定しておく必要があります
 - 通常の CLI 起動（`cat-watcher -g ... -r ...`）の動作は変わりません
+
+**UNC（ネットワーク）パスを監視する場合**:
+
+サービスは既定で **LocalSystem アカウント** で実行されます。LocalSystem はネットワーク共有への資格情報を持たないため、`watch.path` や `destination` に UNC パス（`\\server\share\...`）があると **サービス起動時はアクセスできず、監視・コピーが失敗します**（CLI 起動ではログオンユーザーの資格情報で接続されるため動作する、という差が出ます）。
+
+UNC パスを使う場合は、共有にアクセスできるアカウントでサービスを実行するよう変更してください:
+
+```cmd
+:: 実行アカウントを変更（services.msc の「ログオン」タブでも変更可）
+sc config cat-watcher obj= "DOMAIN\watcher-user" password= "********"
+sc stop cat-watcher && sc start cat-watcher
+```
+
+- `net use` でマップしたドライブ文字（`Z:\` 等）はユーザーセッション単位のため、サービスからは **アカウントを変更しても見えません**。必ず UNC 形式で指定してください
 
 ### Linux (systemd)
 
