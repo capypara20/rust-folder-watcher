@@ -6,11 +6,23 @@ on:
       - main
   pull_request:
 
+permissions:
+  contents: read
+
+# 同一ブランチへの連続プッシュ時は古い実行をキャンセルする
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   test:
     name: テスト (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
 
@@ -22,15 +34,8 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: cargo キャッシュ
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-
+        uses: Swatinem/rust-cache@v2
 
+      # --locked で Cargo.lock と Cargo.toml の不整合を検出する
       - name: テスト実行
-        run: cargo test --manifest-path cat-watcher/Cargo.toml
+        run: cargo test --locked --manifest-path cat-watcher/Cargo.toml
