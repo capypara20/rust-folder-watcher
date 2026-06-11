@@ -20,6 +20,7 @@ unicode-width = "0.2"
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.6"
+windows-sys = { version = "0.60", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
 
 [build-dependencies]
 winres = "0.1"

@@ -171,6 +171,11 @@ async fn run(cli: &Args) -> Result<(), AppError> {
         return Ok(());
     }
 
+    #[cfg(windows)]
+    if !global_config.system_log.console {
+        hide_console_window();
+    }
+
     let (log, log_handle) = logger::Logger::new_system(&global_config.system_log, true)?;
     let log = Arc::new(log);
 
@@ -196,6 +201,18 @@ fn exit_on_err(result: Result<(), AppError>) {
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
         eprintln!("{}", format!("[{ts}] [ERROR] {e}").red().bold());
         std::process::exit(1);
+    }
+}
+
+#[cfg(windows)]
+fn hide_console_window() {
+    use windows_sys::Win32::System::Console::GetConsoleWindow;
+    use windows_sys::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    unsafe {
+        let hwnd = GetConsoleWindow();
+        if !hwnd.is_null() {
+            ShowWindow(hwnd, SW_HIDE);
+        }
     }
 }
 
