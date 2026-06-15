@@ -437,6 +437,15 @@ async fn writer_task(
                     file_buf.push_str(&line);
                 }
             }
+            // ダッシュボードへのティー（分岐）。System ロガーは Match / Action /
+            // Info-Warn-Error の全種を受信するため、ここ 1 点で重複なく全イベントを
+            // 拾える。配信は取りこぼし許容で、UI が詰まっても監視は遅延しない。
+            #[cfg(feature = "dashboard")]
+            if matches!(kind, LogKind::System) && crate::dashboard::is_active() {
+                if let Some(ev) = crate::dashboard::DashEvent::from_log_entry(entry, &ts) {
+                    crate::dashboard::publish(ev);
+                }
+            }
             // ターミナル出力は従来どおり 1 件ずつ即時に行う（System ロガーのみ）。
             if console {
                 console_print(entry, &ts, &level);
@@ -578,7 +587,7 @@ fn level_to_u8(level: &LogLevel) -> u8 {
     }
 }
 
-fn format_events(events: &HashSet<crate::config::Event>) -> String {
+pub(crate) fn format_events(events: &HashSet<crate::config::Event>) -> String {
     let mut names: Vec<&str> = events
         .iter()
         .map(|e| match e {

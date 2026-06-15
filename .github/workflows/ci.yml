@@ -39,3 +39,7 @@ jobs:
       # --locked で Cargo.lock と Cargo.toml の不整合を検出する
       - name: テスト実行
         run: cargo test --locked --manifest-path cat-watcher/Cargo.toml
+
+      # 既定ビルドには含まれない dashboard feature もコンパイルを検証する
+      - name: ダッシュボード feature ビルド確認
+        run: cargo build --locked --features dashboard --manifest-path cat-watcher/Cargo.toml

@@ -165,6 +165,7 @@ fn make_global(dir: &str, file_name: &str) -> GlobalConfig {
 			level: LogLevel::Info,
 			console: true,
 		},
+		dashboard: None,
 	}
 }
 
@@ -183,6 +184,97 @@ fn test_validate_global_config() {
 	for (label, config) in &bad {
 		assert!(validate_global_config(config).is_err(), "{label} はエラーになるべき");
 	}
+}
+
+// =========================================================
+// DashboardConfig パース / バリデーション
+// =========================================================
+
+#[test]
+fn test_parse_dashboard_config() {
+	let dir = tempdir().unwrap();
+	let dir_path = sanitize_path(dir.path());
+	let toml_str = format!(r#"
+		[retry]
+		count = 1
+		interval_ms = 500
+
+		[system_log]
+		dir = "{dir_path}"
+		file_name = "system.log"
+		rotation = "daily"
+		level = "info"
+
+		[dashboard]
+		enabled = true
+		bind = "127.0.0.1:9000"
+		history = 50
+	"#);
+	let config: GlobalConfig = toml::from_str(&toml_str).unwrap();
+	let dash = config.dashboard.expect("dashboard セクションがパースされていない");
+	assert!(dash.enabled);
+	assert_eq!(dash.bind, "127.0.0.1:9000");
+	assert_eq!(dash.history, 50);
+}
+
+#[test]
+fn test_dashboard_absent_is_none_and_defaults_apply() {
+	let dir = tempdir().unwrap();
+	let dir_path = sanitize_path(dir.path());
+	let base = format!(r#"
+		[retry]
+		count = 1
+		interval_ms = 500
+
+		[system_log]
+		dir = "{dir_path}"
+		file_name = "system.log"
+		rotation = "daily"
+		level = "info"
+	"#);
+
+	// セクションが無ければ None。
+	let config: GlobalConfig = toml::from_str(&base).unwrap();
+	assert!(config.dashboard.is_none());
+
+	// bind / history 省略時は既定値（127.0.0.1:8080 / 200）。
+	let with_defaults = format!("{base}\n[dashboard]\nenabled = true\n");
+	let config: GlobalConfig = toml::from_str(&with_defaults).unwrap();
+	let dash = config.dashboard.unwrap();
+	assert!(dash.enabled);
+	assert_eq!(dash.bind, "127.0.0.1:8080");
+	assert_eq!(dash.history, 200);
+}
+
+#[test]
+fn test_validate_dashboard_bind() {
+	let dir = tempdir().unwrap();
+	let dir_path = dir.path().to_str().unwrap();
+	let mut cfg = make_global(dir_path, "app.log");
+
+	// enabled かつ bind が不正ならエラー。
+	cfg.dashboard = Some(DashboardConfig {
+		enabled: true,
+		bind: "not-an-address".to_string(),
+		history: 10,
+	});
+	assert!(validate_global_config(&cfg).is_err(), "不正な bind はエラーになるべき");
+
+	// 正しい bind は通る。
+	cfg.dashboard = Some(DashboardConfig {
+		enabled: true,
+		bind: "127.0.0.1:8080".to_string(),
+		history: 10,
+	});
+	assert!(validate_global_config(&cfg).is_ok(), "正しい bind は通るべき");
+
+	// enabled=false なら bind が不正でも検証しない。
+	cfg.dashboard = Some(DashboardConfig {
+		enabled: false,
+		bind: "garbage".to_string(),
+		history: 10,
+	});
+	assert!(validate_global_config(&cfg).is_ok(), "無効時は bind を検証しない");
 }
 
 // =========================================================

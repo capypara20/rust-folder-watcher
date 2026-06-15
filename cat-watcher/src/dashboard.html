@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cat-watcher dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --border: #2a3038; --fg: #d6deeb;
+    --muted: #7a8696; --accent: #4aa3ff;
+    --system: #6b7686; --detect: #2ea043; --action: #4aa3ff;
+    --info: #58a6ff; --warn: #d29922; --error: #f85149;
+    --match: #3fb950; --ok: #3fb950; --note: #8b949e; --block: #39c5bb;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 14px; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  h1 .cat { color: var(--accent); }
+  .status { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--match); box-shadow: 0 0 6px var(--match); }
+  .dot.down { background: var(--error); box-shadow: 0 0 6px var(--error); }
+  .spacer { flex: 1; }
+  .toolbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .toolbar label { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+  input[type=text] {
+    background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 6px; padding: 5px 9px; min-width: 200px; font: inherit;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  button {
+    background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 6px; padding: 5px 11px; cursor: pointer; font: inherit;
+  }
+  button:hover { border-color: var(--accent); }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  .chip { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .counter { color: var(--muted); font-size: 12px; }
+
+  #log { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .row {
+    display: grid;
+    grid-template-columns: 168px 64px 56px minmax(0, 1fr);
+    gap: 10px; padding: 2px 14px; align-items: baseline;
+    border-bottom: 1px solid rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .row:hover { background: rgba(255,255,255,.03); }
+  .col-time { color: var(--muted); }
+  .col-body { white-space: pre-wrap; word-break: break-all; }
+  .badge { text-align: center; border-radius: 5px; padding: 0 4px; font-size: 11px; font-weight: 600; }
+  .k-system { background: rgba(107,118,134,.18); color: var(--system); }
+  .k-detect { background: rgba(46,160,67,.16);  color: var(--detect); }
+  .k-action { background: rgba(74,163,255,.16); color: var(--action); }
+  .lv { font-size: 11px; font-weight: 600; }
+  .lv-info  { color: var(--info); }   .lv-warn { color: var(--warn); }
+  .lv-error { color: var(--error); }  .lv-match { color: var(--match); }
+  .lv-ok    { color: var(--ok); }     .lv-note { color: var(--note); }
+  .lv-block { color: var(--block); }  .lv-action { color: var(--action); }
+  .rule { color: var(--accent); }
+  .events { color: var(--warn); }
+  .empty { color: var(--muted); text-align: center; padding: 40px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="cat">🐾 cat-watcher</span> dashboard</h1>
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">接続中…</span></div>
+  <div class="spacer"></div>
+  <div class="toolbar">
+    <label><input type="checkbox" class="kind" value="system" checked><span class="chip k-system">system</span></label>
+    <label><input type="checkbox" class="kind" value="detect" checked><span class="chip k-detect">detect</span></label>
+    <label><input type="checkbox" class="kind" value="action" checked><span class="chip k-action">action</span></label>
+    <input type="text" id="filter" placeholder="フィルタ（パス・メッセージ・ルール）">
+    <button id="autoscroll" class="on">自動スクロール</button>
+    <button id="pause">一時停止</button>
+    <button id="clear">クリア</button>
+    <span class="counter"><span id="count">0</span> 件</span>
+  </div>
+</header>
+<div id="log"><div class="empty">イベント待機中…</div></div>
+
+<script>
+(function () {
+  "use strict";
+  var MAX_EVENTS = 5000;   // 保持する最大イベント数（メモリ）
+  var MAX_DOM = 2000;      // DOM に残す最大行数（描画負荷対策）
+
+  var logEl = document.getElementById("log");
+  var dot = document.getElementById("dot");
+  var statusText = document.getElementById("statusText");
+  var filterEl = document.getElementById("filter");
+  var countEl = document.getElementById("count");
+  var btnAuto = document.getElementById("autoscroll");
+  var btnPause = document.getElementById("pause");
+  var btnClear = document.getElementById("clear");
+
+  var events = [];          // 受信した全イベント（MAX_EVENTS で切り詰め）
+  var autoscroll = true;
+  var paused = false;
+  var pendingWhilePaused = 0;
+  var emptyShown = true;
+
+  function activeKinds() {
+    var set = {};
+    document.querySelectorAll("input.kind").forEach(function (c) {
+      if (c.checked) set[c.value] = true;
+    });
+    return set;
+  }
+
+  function matchesFilter(ev, kinds, text) {
+    if (!kinds[ev.kind]) return false;
+    if (text) {
+      var hay = ((ev.rule || "") + " " + (ev.path || "") + " " +
+                 (ev.message || "") + " " + (ev.events || "")).toLowerCase();
+      if (hay.indexOf(text) === -1) return false;
+    }
+    return true;
+  }
+
+  function buildRow(ev) {
+    var row = document.createElement("div");
+    row.className = "row";
+
+    var time = document.createElement("span");
+    time.className = "col-time";
+    time.textContent = ev.ts;
+
+    var kind = document.createElement("span");
+    kind.className = "badge k-" + ev.kind;
+    kind.textContent = ev.kind;
+
+    var lv = document.createElement("span");
+    lv.className = "lv lv-" + ev.level;
+    lv.textContent = ev.level;
+
+    var body = document.createElement("span");
+    body.className = "col-body";
+    if (ev.rule) {
+      var r = document.createElement("span");
+      r.className = "rule";
+      r.textContent = "[" + ev.rule + "] ";
+      body.appendChild(r);
+    }
+    if (ev.path) body.appendChild(document.createTextNode(ev.path + " "));
+    if (ev.message) body.appendChild(document.createTextNode(ev.message + " "));
+    if (ev.events) {
+      var evs = document.createElement("span");
+      evs.className = "events";
+      evs.textContent = "(" + ev.events + ")";
+      body.appendChild(evs);
+    }
+
+    row.appendChild(time);
+    row.appendChild(kind);
+    row.appendChild(lv);
+    row.appendChild(body);
+    return row;
+  }
+
+  function clearEmpty() {
+    if (emptyShown) { logEl.innerHTML = ""; emptyShown = false; }
+  }
+
+  function append(ev, kinds, text) {
+    if (!matchesFilter(ev, kinds, text)) return;
+    clearEmpty();
+    var nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+    logEl.appendChild(buildRow(ev));
+    while (logEl.childNodes.length > MAX_DOM) logEl.removeChild(logEl.firstChild);
+    if (autoscroll && nearBottom) logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // フィルタ変更・クリア後の全再描画
+  function rerender() {
+    var kinds = activeKinds();
+    var text = filterEl.value.trim().toLowerCase();
+    logEl.innerHTML = "";
+    emptyShown = false;
+    var slice = events.slice(-MAX_DOM);
+    var frag = document.createDocumentFragment();
+    var shown = 0;
+    for (var i = 0; i < slice.length; i++) {
+      if (matchesFilter(slice[i], kinds, text)) { frag.appendChild(buildRow(slice[i])); shown++; }
+    }
+    if (shown === 0) {
+      logEl.innerHTML = '<div class="empty">表示できるイベントがありません</div>';
+      emptyShown = true;
+    } else {
+      logEl.appendChild(frag);
+      if (autoscroll) logEl.scrollTop = logEl.scrollHeight;
+    }
+  }
+
+  function onEvent(ev) {
+    events.push(ev);
+    if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+    countEl.textContent = events.length;
+    if (paused) {
+      pendingWhilePaused++;
+      btnPause.textContent = "再開 (" + pendingWhilePaused + ")";
+      return;
+    }
+    append(ev, activeKinds(), filterEl.value.trim().toLowerCase());
+  }
+
+  // --- SSE 接続 ---
+  function connect() {
+    var es = new EventSource("/events");
+    es.onopen = function () {
+      dot.className = "dot live";
+      statusText.textContent = "接続中（ライブ）";
+    };
+    es.onerror = function () {
+      // EventSource は自動再接続する。状態だけ反映。
+      dot.className = "dot down";
+      statusText.textContent = "切断（再接続中…）";
+    };
+    es.onmessage = function (e) {
+      try { onEvent(JSON.parse(e.data)); } catch (_) { /* 不正データは無視 */ }
+    };
+  }
+
+  // --- UI ハンドラ ---
+  document.querySelectorAll("input.kind").forEach(function (c) {
+    c.addEventListener("change", rerender);
+  });
+  filterEl.addEventListener("input", rerender);
+  btnAuto.addEventListener("click", function () {
+    autoscroll = !autoscroll;
+    btnAuto.classList.toggle("on", autoscroll);
+    if (autoscroll) logEl.scrollTop = logEl.scrollHeight;
+  });
+  btnPause.addEventListener("click", function () {
+    paused = !paused;
+    btnPause.classList.toggle("on", paused);
+    if (paused) {
+      btnPause.textContent = "再開";
+    } else {
+      btnPause.textContent = "一時停止";
+      pendingWhilePaused = 0;
+      rerender();
+    }
+  });
+  btnClear.addEventListener("click", function () {
+    events = [];
+    countEl.textContent = "0";
+    pendingWhilePaused = 0;
+    if (paused) btnPause.textContent = "再開";
+    logEl.innerHTML = '<div class="empty">クリアしました。新しいイベントを待機中…</div>';
+    emptyShown = true;
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

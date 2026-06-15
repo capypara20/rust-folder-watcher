@@ -10,6 +10,8 @@ use crate::error::AppError;
 mod actions;
 mod config;
 mod csv_import;
+#[cfg(feature = "dashboard")]
+mod dashboard;
 mod error;
 mod logger;
 mod placeholder;
@@ -184,6 +186,18 @@ async fn run(cli: &Args) -> Result<(), AppError> {
         global_path.display(),
         rules_path.display()
     ));
+
+    // ダッシュボード（任意・既定 OFF・dashboard feature 有効時のみ）。
+    // 監視を開始する前にハブを初期化し、HTTP/SSE サーバを別タスクで起動する。
+    #[cfg(feature = "dashboard")]
+    if let Some(dash) = &global_config.dashboard {
+        if dash.enabled {
+            dashboard::init(dash.history);
+            let bind = dash.bind.clone();
+            let dlog = Arc::clone(&log);
+            tokio::spawn(async move { dashboard::serve(bind, dlog).await; });
+        }
+    }
 
     let result = watcher::start_watching(&rules_conf.rules, &global_config.retry, Arc::clone(&log)).await;
     if let Err(e) = &result {
