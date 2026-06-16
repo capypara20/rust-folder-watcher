@@ -81,10 +81,10 @@
 cargo build --release --locked --manifest-path cat-watcher/Cargo.toml
 ```
 
-[ダッシュボード](#ダッシュボードブラウザでリアルタイム表示)（ブラウザでのリアルタイム表示）を使う場合は `dashboard` feature を付けてビルドします（任意・既定は無効）：
+[ダッシュボード](#ダッシュボードブラウザでリアルタイム表示)（ブラウザでのリアルタイム表示）は**既定で同梱**されます。スリムにしたい場合のみ `--no-default-features` で外せます：
 
 ```bash
-cargo build --release --locked --features dashboard --manifest-path cat-watcher/Cargo.toml
+cargo build --release --locked --no-default-features --manifest-path cat-watcher/Cargo.toml
 ```
 
 ## クイックスタート
@@ -386,11 +386,7 @@ Windows / Linux 共通の挙動です。
 
 ### ビルドと有効化
 
-機能を使うには `dashboard` feature 付きでビルドします（任意・既定は無効）。
-
-```bash
-cargo build --release --locked --features dashboard --manifest-path cat-watcher/Cargo.toml
-```
+ダッシュボードは**既定ビルドに同梱**されています（`cargo build` でそのまま含まれ、リリースのバイナリにも入ります）。不要なら `--no-default-features` で外せます。
 
 `global.toml` に `[dashboard]` を追加し `enabled = true` にすると、監視の起動と同時に
 ローカル HTTP サーバが立ち上がります。
@@ -416,7 +412,7 @@ history = 200               # 接続時にブラウザへ再生する直近イ�
 - **セキュリティ**: 既定は `127.0.0.1`（ローカルのみ）。ログにはファイルパスが
   含まれるため、外部公開は慎重に。リモートで見たい場合は SSH トンネルや
   リバースプロキシ経由を推奨します（本体に認証・TLS はありません）。
-- feature 無しでビルドした場合、`[dashboard]` セクションを書いても無視されます
+- `--no-default-features` でビルドした場合、`[dashboard]` セクションを書いても無視されます
   （設定エラーにはなりません）。
 
 ## 常駐化（サービス登録）

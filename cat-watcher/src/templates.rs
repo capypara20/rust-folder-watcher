@@ -17,7 +17,7 @@ console   = true                  # コンソールへの出力 ON/OFF
 # ─── ダッシュボード（ブラウザでログをリアルタイム表示）─────────────────
 # enabled = true でローカル HTTP サーバを起動し、ブラウザの
 #   http://127.0.0.1:8080/  で検知/アクション/システムログをライブ表示します。
-#   ※ 動作には dashboard feature 付きビルドが必要: cargo build --release --features dashboard
+#   ※ 既定ビルドに同梱（enabled=false なら起動しません）。
 #   ※ bind はローカル限定を推奨（ログにファイルパスが出ます。外部公開は慎重に）。
 [dashboard]
 enabled = false

@@ -128,6 +128,11 @@ fn run_watcher(
 
         log.info("Windowsサービスとして起動しました".to_string());
 
+        // ダッシュボード（既定で同梱）。サービス常駐でもブラウザから閲覧できるよう、
+        // CLI 起動と同じ共通入口でローカル HTTP/SSE サーバを起動する。
+        #[cfg(feature = "dashboard")]
+        crate::dashboard::start(&global_config, &rules_conf.rules, Arc::clone(&log));
+
         let result = tokio::select! {
             result = watcher::start_watching(&rules_conf.rules, &global_config.retry, Arc::clone(&log)) => result,
             _ = stop_rx => {

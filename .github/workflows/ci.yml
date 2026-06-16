@@ -40,6 +40,6 @@ jobs:
       - name: テスト実行
         run: cargo test --locked --manifest-path cat-watcher/Cargo.toml
 
-      # 既定ビルドには含まれない dashboard feature もコンパイルを検証する
-      - name: ダッシュボード feature ビルド確認
-        run: cargo build --locked --features dashboard --manifest-path cat-watcher/Cargo.toml
+      # dashboard は既定で同梱。--no-default-features の最小ビルドが壊れていないかも検証する
+      - name: 最小ビルド確認（--no-default-features）
+        run: cargo build --locked --no-default-features --manifest-path cat-watcher/Cargo.toml
