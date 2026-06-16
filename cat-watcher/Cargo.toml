@@ -1,12 +1,13 @@
 [package]
 name = "cat-watcher"
-version = "1.2.4"
+version = "1.2.5"
 edition = "2021"
 
 [features]
-default = []
-# ブラウザでログをリアルタイム表示するダッシュボード（localhost HTTP + SSE）。
-# 既定 OFF。追加依存は serde_json と tokio/net のみ。
+# ダッシュボード（ブラウザでログをリアルタイム表示・localhost HTTP + SSE）を
+# 既定で同梱する。スリムにしたい場合は --no-default-features で外せる。
+default = ["dashboard"]
+# 追加依存は serde_json と tokio/net のみ。
 dashboard = ["dep:serde_json", "tokio/net"]
 
 [dependencies]

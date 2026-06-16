@@ -187,45 +187,10 @@ async fn run(cli: &Args) -> Result<(), AppError> {
         rules_path.display()
     ));
 
-    // ダッシュボード（任意・既定 OFF・dashboard feature 有効時のみ）。
+    // ダッシュボード（既定で同梱・設定 enabled=true のときだけ起動）。
     // 監視を開始する前にハブを初期化し、HTTP/SSE サーバを別タスクで起動する。
     #[cfg(feature = "dashboard")]
-    if let Some(dash) = &global_config.dashboard {
-        if dash.enabled {
-            // 過去ログ検索の対象を設定から集める（システムログ＋有効なルール別ログ）。
-            let mut sources = vec![dashboard::LogSource {
-                kind: "system",
-                dir: global_config.system_log.dir.clone(),
-                file_name: global_config.system_log.file_name.clone(),
-            }];
-            for rule in &rules_conf.rules {
-                if let Some(rule_log) = &rule.log {
-                    if let Some(detect) = &rule_log.detect {
-                        if detect.enabled {
-                            sources.push(dashboard::LogSource {
-                                kind: "detect",
-                                dir: detect.dir.clone(),
-                                file_name: detect.file_name.clone(),
-                            });
-                        }
-                    }
-                    if let Some(action) = &rule_log.action {
-                        if action.enabled {
-                            sources.push(dashboard::LogSource {
-                                kind: "action",
-                                dir: action.dir.clone(),
-                                file_name: action.file_name.clone(),
-                            });
-                        }
-                    }
-                }
-            }
-            dashboard::init(dash.history, sources);
-            let bind = dash.bind.clone();
-            let dlog = Arc::clone(&log);
-            tokio::spawn(async move { dashboard::serve(bind, dlog).await; });
-        }
-    }
+    dashboard::start(&global_config, &rules_conf.rules, Arc::clone(&log));
 
     let result = watcher::start_watching(&rules_conf.rules, &global_config.retry, Arc::clone(&log)).await;
     if let Err(e) = &result {

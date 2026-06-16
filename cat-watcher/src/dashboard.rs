@@ -206,6 +206,48 @@ pub fn publish(mut ev: DashEvent) {
     let _ = hub.tx.send(ev);
 }
 
+/// 設定からダッシュボードを初期化し、HTTP/SSE サーバを別タスクで起動する。
+/// `dashboard` が未設定 / `enabled=false` のときは何もしない。
+/// CLI 起動（`main`）と Windows サービス起動（`service`）の両方から呼ぶ共通入口。
+/// tokio ランタイム上で呼ぶこと（内部で `tokio::spawn` する）。
+pub fn start(global: &crate::config::GlobalConfig, rules: &[crate::config::Rule], log: Arc<Logger>) {
+    let Some(dash) = &global.dashboard else { return };
+    if !dash.enabled {
+        return;
+    }
+    // 過去ログ検索の対象を設定から集める（システムログ＋有効なルール別ログ）。
+    let mut sources = vec![LogSource {
+        kind: "system",
+        dir: global.system_log.dir.clone(),
+        file_name: global.system_log.file_name.clone(),
+    }];
+    for rule in rules {
+        if let Some(rule_log) = &rule.log {
+            if let Some(detect) = &rule_log.detect {
+                if detect.enabled {
+                    sources.push(LogSource {
+                        kind: "detect",
+                        dir: detect.dir.clone(),
+                        file_name: detect.file_name.clone(),
+                    });
+                }
+            }
+            if let Some(action) = &rule_log.action {
+                if action.enabled {
+                    sources.push(LogSource {
+                        kind: "action",
+                        dir: action.dir.clone(),
+                        file_name: action.file_name.clone(),
+                    });
+                }
+            }
+        }
+    }
+    init(dash.history, sources);
+    let bind = dash.bind.clone();
+    tokio::spawn(async move { serve(bind, log).await });
+}
+
 /// HTTP/SSE サーバを起動する。`bind` は `"127.0.0.1:8080"` 形式。
 /// 失敗してもプロセスは落とさず、system ログに記録して戻る。
 pub async fn serve(bind: String, log: Arc<Logger>) {
