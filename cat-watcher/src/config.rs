@@ -98,6 +98,37 @@ impl_case_insensitive_deserialize!(ActionType,
 pub struct GlobalConfig {
     pub retry: RetryConfig,
     pub system_log: SystemLogConfig,
+    /// ダッシュボード設定（省略可）。未指定なら無効。
+    #[serde(default)]
+    pub dashboard: Option<DashboardConfig>,
+}
+
+/// ダッシュボード（ブラウザでログをリアルタイム表示する localhost HTTP サーバ）設定。
+/// 実際に機能するのは `dashboard` feature を有効にしてビルドした場合のみ。
+/// feature 無しビルドでも設定の読み込み・検証は行う（セクションを書いてもエラーにしない）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DashboardConfig {
+    /// ダッシュボードを起動するか。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 待ち受けアドレス。ログにパスが出るためローカル限定を推奨。
+    #[serde(default = "default_dashboard_bind")]
+    pub bind: String,
+    /// 接続時にブラウザへ再生する直近イベント件数（メモリ保持）。
+    // history はサーバ起動時（dashboard feature 有効時）のみ参照するため、
+    // feature 無しビルドでは未使用になる。
+    #[cfg_attr(not(feature = "dashboard"), allow(dead_code))]
+    #[serde(default = "default_dashboard_history")]
+    pub history: usize,
+}
+
+fn default_dashboard_bind() -> String {
+    "127.0.0.1:8080".to_string()
+}
+
+fn default_dashboard_history() -> usize {
+    200
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -308,6 +339,14 @@ pub fn validate_global_config(config: &GlobalConfig) -> Result<(), AppError> {
 		"system_log.file_name",
 		&mut errors,
 	);
+	if let Some(dashboard) = &config.dashboard {
+		if dashboard.enabled && dashboard.bind.parse::<std::net::SocketAddr>().is_err() {
+			errors.push(format!(
+				"dashboard.bind がソケットアドレスとして不正です（例: 127.0.0.1:8080）: {}",
+				dashboard.bind
+			));
+		}
+	}
 	finish_validation(errors)
 }
 

@@ -1,0 +1,413 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cat-watcher dashboard</title>
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --border: #2a3038; --fg: #d6deeb;
+    --muted: #7a8696; --accent: #4aa3ff;
+    --system: #6b7686; --detect: #2ea043; --action: #4aa3ff;
+    --info: #58a6ff; --warn: #d29922; --error: #f85149;
+    --match: #3fb950; --ok: #3fb950; --note: #8b949e; --block: #39c5bb;
+    --mark: #ffd33d; --mark-cur: #ff9d3d;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--fg);
+    font: 13px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+    display: flex; flex-direction: column;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px 14px; flex-wrap: wrap;
+    padding: 10px 14px; background: var(--panel); border-bottom: 1px solid var(--border);
+  }
+  h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: .3px; white-space: nowrap; }
+  h1 .cat { color: var(--accent); }
+  .status { display: flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); }
+  .dot.live { background: var(--match); box-shadow: 0 0 6px var(--match); }
+  .dot.down { background: var(--error); box-shadow: 0 0 6px var(--error); }
+  .group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .group.grow { flex: 1; min-width: 280px; }
+  label.ck { display: inline-flex; align-items: center; gap: 5px; cursor: pointer; user-select: none; }
+  input[type=text] {
+    background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 6px; padding: 5px 9px; font: inherit; flex: 1; min-width: 160px;
+  }
+  input[type=text]:focus { outline: none; border-color: var(--accent); }
+  input[type=text].invalid { border-color: var(--error); }
+  button {
+    background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+    border-radius: 6px; padding: 5px 10px; cursor: pointer; font: inherit; white-space: nowrap;
+  }
+  button:hover { border-color: var(--accent); }
+  button.on { border-color: var(--accent); color: var(--accent); }
+  button.icon { padding: 5px 9px; }
+  .chip { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+  .counter { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .matchinfo { color: var(--muted); font-size: 12px; min-width: 56px; text-align: center; }
+
+  #banner {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 8px 14px; background: #1b2230; border-bottom: 1px solid var(--border); color: var(--fg);
+  }
+  #banner .ttl { font-weight: 600; }
+
+  #log { flex: 1; overflow-y: auto; padding: 4px 0; }
+  .row {
+    display: grid;
+    grid-template-columns: 168px 64px 56px minmax(0, 1fr);
+    gap: 10px; padding: 2px 14px; align-items: baseline;
+    border-bottom: 1px solid rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .row:hover { background: rgba(255,255,255,.03); }
+  .row.detect { border-left: 3px solid var(--detect); padding-left: 11px; }
+  .row.flash { animation: flash 1.1s ease-out; }
+  @keyframes flash {
+    0%   { background: rgba(63,185,80,.35); }
+    100% { background: transparent; }
+  }
+  .hrow {
+    display: grid; grid-template-columns: 64px 210px minmax(0, 1fr);
+    gap: 10px; padding: 2px 14px; align-items: baseline;
+    border-bottom: 1px solid rgba(255,255,255,.03); white-space: nowrap;
+  }
+  .hrow:hover { background: rgba(255,255,255,.03); }
+  .col-time { color: var(--muted); }
+  .col-body, .hline { white-space: pre-wrap; word-break: break-all; }
+  .file { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  .badge { text-align: center; border-radius: 5px; padding: 0 4px; font-size: 11px; font-weight: 600; }
+  .k-system { background: rgba(107,118,134,.18); color: var(--system); }
+  .k-detect { background: rgba(46,160,67,.16);  color: var(--detect); }
+  .k-action { background: rgba(74,163,255,.16); color: var(--action); }
+  .lv { font-size: 11px; font-weight: 600; }
+  .lv-info  { color: var(--info); }   .lv-warn { color: var(--warn); }
+  .lv-error { color: var(--error); }  .lv-match { color: var(--match); }
+  .lv-ok    { color: var(--ok); }     .lv-note { color: var(--note); }
+  .lv-block { color: var(--block); }  .lv-action { color: var(--action); }
+  .rule { color: var(--accent); }
+  .events { color: var(--warn); }
+  .empty { color: var(--muted); text-align: center; padding: 40px; }
+  mark { background: var(--mark); color: #1a1a1a; border-radius: 2px; }
+  mark.current { background: var(--mark-cur); outline: 1px solid #fff6; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="cat">🐾 cat-watcher</span> dashboard</h1>
+  <div class="status"><span id="dot" class="dot"></span><span id="statusText">接続中…</span></div>
+
+  <div class="group">
+    <label class="ck"><input type="checkbox" class="kind" value="system" checked><span class="chip k-system">system</span></label>
+    <label class="ck"><input type="checkbox" class="kind" value="detect" checked><span class="chip k-detect">detect</span></label>
+    <label class="ck"><input type="checkbox" class="kind" value="action" checked><span class="chip k-action">action</span></label>
+  </div>
+
+  <div class="group grow">
+    <input type="text" id="search" placeholder="検索（Enter=次 / Shift+Enter=前 / Ctrl+Enter=過去ログ）">
+    <button id="tCase" class="icon" title="大文字小文字を区別">Aa</button>
+    <button id="tRegex" class="icon" title="正規表現">.*</button>
+    <button id="prev" class="icon" title="前の一致 (Shift+Enter)">◀</button>
+    <span id="matchInfo" class="matchinfo">0/0</span>
+    <button id="next" class="icon" title="次の一致 (Enter)">▶</button>
+    <label class="ck"><input type="checkbox" id="only">一致のみ</label>
+    <button id="histBtn" title="保存済みログファイルを横断検索 (Ctrl+Enter)">📁 過去ログ</button>
+  </div>
+
+  <div class="group">
+    <button id="autoscroll" class="on">自動スクロール</button>
+    <button id="pause">一時停止</button>
+    <button id="clear">クリア</button>
+    <span class="counter"><span id="count">0</span> 件</span>
+  </div>
+</header>
+
+<div id="banner" hidden></div>
+<div id="log"><div class="empty">イベント待機中…</div></div>
+
+<script>
+(function () {
+  "use strict";
+  var MAX_EVENTS = 5000;   // メモリに保持する最大イベント数
+  var MAX_DOM = 2000;      // DOM に残す最大行数（描画負荷対策）
+
+  var $ = function (id) { return document.getElementById(id); };
+  var logEl = $("log"), banner = $("banner"), dot = $("dot"), statusText = $("statusText");
+  var searchEl = $("search"), matchInfo = $("matchInfo"), countEl = $("count");
+  var onlyEl = $("only");
+
+  var events = [];
+  var autoscroll = true, paused = false, pendingWhilePaused = 0;
+  var caseSensitive = false, useRegex = false;
+  var mode = "live";          // "live" | "history"
+  var currentRe = null;       // 現在の検索用 RegExp（null=検索なし/無効）
+  var currentMatch = -1;      // ナビゲーション中の <mark> インデックス
+  var flashArmed = false;     // 接続直後のバックログ再生では光らせない
+
+  // ---- 検索条件 ----
+  function escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"); }
+  function rebuildRegex() {
+    var term = searchEl.value;
+    searchEl.classList.remove("invalid");
+    if (!term) { currentRe = null; return; }
+    try {
+      var src = useRegex ? term : escapeRe(term);
+      currentRe = new RegExp(src, caseSensitive ? "g" : "gi");
+    } catch (e) {
+      currentRe = null;
+      searchEl.classList.add("invalid");
+    }
+  }
+  function hay(ev) {
+    return [ev.rule, ev.path, ev.message, ev.events].filter(Boolean).join(" ");
+  }
+  function evMatches(ev) {
+    if (!currentRe) return false;
+    currentRe.lastIndex = 0;
+    return currentRe.test(hay(ev));
+  }
+
+  // ---- DOM ヘルパ ----
+  function el(tag, cls, text) {
+    var e = document.createElement(tag);
+    if (cls) e.className = cls;
+    if (text != null) e.textContent = text;
+    return e;
+  }
+  // text を re で分割し、一致部分を <mark> で包んで parent に追加する
+  function appendHi(parent, text, trailing) {
+    text = (text || "") + (trailing || "");
+    if (!currentRe || !text) { if (text) parent.appendChild(document.createTextNode(text)); return; }
+    currentRe.lastIndex = 0;
+    var last = 0, m;
+    while ((m = currentRe.exec(text)) !== null) {
+      if (m.index > last) parent.appendChild(document.createTextNode(text.slice(last, m.index)));
+      parent.appendChild(el("mark", null, m[0]));
+      last = m.index + m[0].length;
+      if (m[0].length === 0) currentRe.lastIndex++;  // 空マッチで無限ループしない
+    }
+    if (last < text.length) parent.appendChild(document.createTextNode(text.slice(last)));
+  }
+
+  function buildLiveRow(ev) {
+    var row = el("div", "row " + ev.kind);
+    row.appendChild(el("span", "col-time", ev.ts));
+    row.appendChild(el("span", "badge k-" + ev.kind, ev.kind));
+    row.appendChild(el("span", "lv lv-" + ev.level, ev.level));
+    var body = el("span", "col-body");
+    if (ev.rule) {
+      var r = el("span", "rule");
+      r.appendChild(document.createTextNode("["));
+      appendHi(r, ev.rule);
+      r.appendChild(document.createTextNode("] "));
+      body.appendChild(r);
+    }
+    if (ev.path) appendHi(body, ev.path, " ");
+    if (ev.message) appendHi(body, ev.message, " ");
+    if (ev.events) {
+      var evs = el("span", "events");
+      evs.appendChild(document.createTextNode("("));
+      appendHi(evs, ev.events);
+      evs.appendChild(document.createTextNode(")"));
+      body.appendChild(evs);
+    }
+    row.appendChild(body);
+    return row;
+  }
+
+  function passKind(ev) { return kinds()[ev.kind]; }
+  function kinds() {
+    var set = {};
+    document.querySelectorAll("input.kind").forEach(function (c) { if (c.checked) set[c.value] = true; });
+    return set;
+  }
+  function shouldShow(ev) {
+    if (!passKind(ev)) return false;
+    if (onlyEl.checked && currentRe && !evMatches(ev)) return false;
+    return true;
+  }
+
+  // ---- ライブ表示 ----
+  var emptyShown = true;
+  function clearEmpty() { if (emptyShown) { logEl.innerHTML = ""; emptyShown = false; } }
+
+  function appendLive(ev, isNew) {
+    if (mode !== "live" || !shouldShow(ev)) return;
+    clearEmpty();
+    var nearBottom = logEl.scrollHeight - logEl.scrollTop - logEl.clientHeight < 40;
+    var row = buildLiveRow(ev);
+    if (isNew && flashArmed && ev.kind === "detect") row.classList.add("flash");
+    logEl.appendChild(row);
+    while (logEl.childNodes.length > MAX_DOM) logEl.removeChild(logEl.firstChild);
+    if (autoscroll && nearBottom) logEl.scrollTop = logEl.scrollHeight;
+    updateMatchInfo();
+  }
+
+  function rerenderLive() {
+    mode = "live"; banner.hidden = true;
+    rebuildRegex();
+    logEl.innerHTML = ""; emptyShown = false;
+    var slice = events.slice(-MAX_DOM);
+    var frag = document.createDocumentFragment();
+    var shown = 0;
+    for (var i = 0; i < slice.length; i++) {
+      if (shouldShow(slice[i])) { frag.appendChild(buildLiveRow(slice[i])); shown++; }
+    }
+    if (shown === 0) {
+      logEl.innerHTML = '<div class="empty">表示できるイベントがありません</div>';
+      emptyShown = true;
+    } else {
+      logEl.appendChild(frag);
+      if (autoscroll) logEl.scrollTop = logEl.scrollHeight;
+    }
+    currentMatch = -1;
+    updateMatchInfo();
+  }
+
+  function onEvent(ev) {
+    events.push(ev);
+    if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
+    countEl.textContent = events.length;
+    if (paused) {
+      pendingWhilePaused++;
+      $("pause").textContent = "再開 (" + pendingWhilePaused + ")";
+      return;
+    }
+    appendLive(ev, true);
+  }
+
+  // ---- 検索ナビゲーション（ハイライト間の移動）----
+  function marks() { return logEl.querySelectorAll("mark"); }
+  function updateMatchInfo() {
+    var ms = marks();
+    if (currentMatch >= ms.length) currentMatch = ms.length - 1;
+    matchInfo.textContent = (ms.length ? (currentMatch + 1) : 0) + "/" + ms.length;
+  }
+  function gotoMatch(delta) {
+    var ms = marks();
+    if (!ms.length) return;
+    if (currentMatch >= 0 && ms[currentMatch]) ms[currentMatch].classList.remove("current");
+    currentMatch = (currentMatch + delta + ms.length) % ms.length;
+    var cur = ms[currentMatch];
+    cur.classList.add("current");
+    cur.scrollIntoView({ block: "center", behavior: "smooth" });
+    matchInfo.textContent = (currentMatch + 1) + "/" + ms.length;
+  }
+
+  // ---- 過去ログ検索（サーバ）----
+  function runHistory() {
+    var term = searchEl.value.trim();
+    if (!term) { searchEl.focus(); return; }
+    var url = "/search?q=" + encodeURIComponent(term) +
+              "&regex=" + (useRegex ? 1 : 0) +
+              "&ci=" + (caseSensitive ? 0 : 1) + "&limit=1000";
+    banner.hidden = false;
+    banner.innerHTML = "";
+    banner.appendChild(el("span", "ttl", "過去ログ検索中… 「" + term + "」"));
+    fetch(url).then(function (r) { return r.json(); }).then(renderHistory)
+      .catch(function (e) {
+        banner.innerHTML = "";
+        banner.appendChild(el("span", "ttl", "検索に失敗しました: " + e));
+        addBackButton();
+      });
+  }
+  function addBackButton() {
+    var back = el("button", null, "✕ ライブに戻る");
+    back.addEventListener("click", rerenderLive);
+    banner.appendChild(back);
+  }
+  function renderHistory(res) {
+    mode = "history";
+    rebuildRegex();
+    banner.hidden = false; banner.innerHTML = "";
+    var ttl = "過去ログ検索: 「" + (res.query || "") + "」 — " + res.hits.length + " 件" +
+              (res.truncated ? "（上限で打ち切り）" : "") + "  / 走査 " + res.scanned_files + " ファイル";
+    banner.appendChild(el("span", "ttl", ttl));
+    addBackButton();
+
+    logEl.innerHTML = ""; emptyShown = false;
+    if (!res.hits.length) {
+      logEl.innerHTML = '<div class="empty">一致するログが見つかりませんでした</div>';
+      emptyShown = true;
+      currentMatch = -1; updateMatchInfo(); return;
+    }
+    var frag = document.createDocumentFragment();
+    res.hits.forEach(function (h) {
+      var row = el("div", "hrow");
+      row.appendChild(el("span", "badge k-" + h.kind, h.kind));
+      row.appendChild(el("span", "file", h.file));
+      var line = el("span", "hline");
+      appendHi(line, h.line);
+      row.appendChild(line);
+      frag.appendChild(row);
+    });
+    logEl.appendChild(frag);
+    logEl.scrollTop = 0;
+    currentMatch = -1;
+    updateMatchInfo();
+  }
+
+  // ---- 検索条件が変わったときの再描画 ----
+  var debounce;
+  function onSearchChanged() {
+    clearTimeout(debounce);
+    debounce = setTimeout(function () {
+      if (mode === "live") rerenderLive(); else { rebuildRegex(); /* 履歴はボタンで再取得 */ }
+    }, 120);
+  }
+
+  // ---- SSE 接続 ----
+  function connect() {
+    var es = new EventSource("/events");
+    es.onopen = function () {
+      dot.className = "dot live"; statusText.textContent = "接続中（ライブ）";
+      flashArmed = false;
+      setTimeout(function () { flashArmed = true; }, 1000);  // バックログ再生後に点滅を有効化
+    };
+    es.onerror = function () { dot.className = "dot down"; statusText.textContent = "切断（再接続中…）"; };
+    es.onmessage = function (e) { try { onEvent(JSON.parse(e.data)); } catch (_) {} };
+  }
+
+  // ---- UI ハンドラ ----
+  document.querySelectorAll("input.kind").forEach(function (c) { c.addEventListener("change", function () { if (mode === "live") rerenderLive(); }); });
+  onlyEl.addEventListener("change", function () { if (mode === "live") rerenderLive(); });
+  searchEl.addEventListener("input", onSearchChanged);
+  searchEl.addEventListener("keydown", function (e) {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runHistory(); }
+    else if (e.key === "Enter" && e.shiftKey) { e.preventDefault(); gotoMatch(-1); }
+    else if (e.key === "Enter") { e.preventDefault(); gotoMatch(1); }
+  });
+  $("next").addEventListener("click", function () { gotoMatch(1); });
+  $("prev").addEventListener("click", function () { gotoMatch(-1); });
+  $("histBtn").addEventListener("click", runHistory);
+  $("tCase").addEventListener("click", function () {
+    caseSensitive = !caseSensitive; $("tCase").classList.toggle("on", caseSensitive); onSearchChanged();
+  });
+  $("tRegex").addEventListener("click", function () {
+    useRegex = !useRegex; $("tRegex").classList.toggle("on", useRegex); onSearchChanged();
+  });
+  $("autoscroll").addEventListener("click", function () {
+    autoscroll = !autoscroll; $("autoscroll").classList.toggle("on", autoscroll);
+    if (autoscroll && mode === "live") logEl.scrollTop = logEl.scrollHeight;
+  });
+  $("pause").addEventListener("click", function () {
+    paused = !paused; $("pause").classList.toggle("on", paused);
+    if (paused) { $("pause").textContent = "再開"; }
+    else { $("pause").textContent = "一時停止"; pendingWhilePaused = 0; if (mode === "live") rerenderLive(); }
+  });
+  $("clear").addEventListener("click", function () {
+    events = []; countEl.textContent = "0"; pendingWhilePaused = 0;
+    if (paused) $("pause").textContent = "再開";
+    rerenderLive();
+    logEl.innerHTML = '<div class="empty">クリアしました。新しいイベントを待機中…</div>'; emptyShown = true;
+    currentMatch = -1; updateMatchInfo();
+  });
+
+  connect();
+})();
+</script>
+</body>
+</html>

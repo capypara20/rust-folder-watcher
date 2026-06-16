@@ -13,6 +13,16 @@ file_name = "system_{Date}.log"   # {Date} / {DateTime}
 rotation  = "daily"               # daily / never
 level     = "info"                # trace / debug / info / warn / error
 console   = true                  # コンソールへの出力 ON/OFF
+
+# ─── ダッシュボード（ブラウザでログをリアルタイム表示）─────────────────
+# enabled = true でローカル HTTP サーバを起動し、ブラウザの
+#   http://127.0.0.1:8080/  で検知/アクション/システムログをライブ表示します。
+#   ※ 動作には dashboard feature 付きビルドが必要: cargo build --release --features dashboard
+#   ※ bind はローカル限定を推奨（ログにファイルパスが出ます。外部公開は慎重に）。
+[dashboard]
+enabled = false
+bind    = "127.0.0.1:8080"        # 待ち受けアドレス
+history = 200                     # 接続時にブラウザへ再生する直近件数
 "#;
 
 pub const RULES_TOML: &str = r#"[[rules]]
