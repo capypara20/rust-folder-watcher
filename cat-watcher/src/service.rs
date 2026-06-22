@@ -134,7 +134,7 @@ fn run_watcher(
         crate::dashboard::start(&global_config, &rules_conf.rules, Arc::clone(&log));
 
         let result = tokio::select! {
-            result = watcher::start_watching(&rules_conf.rules, &global_config.retry, Arc::clone(&log)) => result,
+            result = watcher::start_watching(&rules_conf.rules, &global_config.retry, global_config.scan_on_start(), Arc::clone(&log)) => result,
             _ = stop_rx => {
                 let _ = status_handle.set_service_status(ServiceStatus {
                     service_type: ServiceType::OWN_PROCESS,

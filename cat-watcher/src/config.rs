@@ -101,6 +101,31 @@ pub struct GlobalConfig {
     /// ダッシュボード設定（省略可）。未指定なら無効。
     #[serde(default)]
     pub dashboard: Option<DashboardConfig>,
+    /// 起動時スキャン設定（省略可）。未指定なら有効（既定 ON）。
+    #[serde(default)]
+    pub startup_scan: Option<StartupScanConfig>,
+}
+
+impl GlobalConfig {
+    /// 起動時スキャンを行うか。セクション未指定なら有効（既定 ON）。
+    /// イベント監視だけでは取りこぼす「起動前から存在するファイル」や
+    /// 「ダウンタイム中に届いたファイル」を回収するための安全網。
+    pub fn scan_on_start(&self) -> bool {
+        self.startup_scan
+            .as_ref()
+            .map(|s| s.enabled)
+            .unwrap_or(true)
+    }
+}
+
+/// 起動時スキャン設定。起動直後に監視フォルダを 1 度だけ走査し、
+/// 既に存在するエントリを Create イベントとして検知パイプラインへ流す。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartupScanConfig {
+    /// 起動時スキャンを行うか。
+    #[serde(default = "default_true")]
+    pub enabled: bool,
 }
 
 /// ダッシュボード（ブラウザでログをリアルタイム表示する localhost HTTP サーバ）設定。

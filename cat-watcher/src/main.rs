@@ -192,7 +192,13 @@ async fn run(cli: &Args) -> Result<(), AppError> {
     #[cfg(feature = "dashboard")]
     dashboard::start(&global_config, &rules_conf.rules, Arc::clone(&log));
 
-    let result = watcher::start_watching(&rules_conf.rules, &global_config.retry, Arc::clone(&log)).await;
+    let result = watcher::start_watching(
+        &rules_conf.rules,
+        &global_config.retry,
+        global_config.scan_on_start(),
+        Arc::clone(&log),
+    )
+    .await;
     if let Err(e) = &result {
         // 監視処理の異常終了はシステム階層のエラーとしてシステムログに残す。
         log.error(format!("監視処理が異常終了しました: {e}"));

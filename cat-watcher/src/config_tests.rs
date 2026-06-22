@@ -166,6 +166,7 @@ fn make_global(dir: &str, file_name: &str) -> GlobalConfig {
 			console: true,
 		},
 		dashboard: None,
+		startup_scan: None,
 	}
 }
 

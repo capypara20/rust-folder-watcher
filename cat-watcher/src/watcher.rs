@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use notify::{recommended_watcher, Event, RecursiveMode, Watcher};
+use notify::event::CreateKind;
+use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
+use walkdir::WalkDir;
 
 use crate::config::{RetryConfig, Rule};
 use crate::error::AppError;
@@ -26,9 +28,13 @@ fn strip_unc_prefix(path: &PathBuf) -> String {
 pub async fn start_watching(
     rules: &[Rule],
     retry: &RetryConfig,
+    scan_on_start: bool,
     log: Arc<Logger>,
 ) -> Result<(), AppError> {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>(100);
+
+    // 起動時スキャンも同じ検知チャネルへ合流させるため、送信ハンドルを複製しておく。
+    let scan_tx = tx.clone();
 
     let mut watcher = recommended_watcher(move |res| {
         let _ = tx.blocking_send(res);
@@ -120,6 +126,15 @@ pub async fn start_watching(
         })?;
     }
 
+    // 監視登録「後」に起動時スキャンを開始する。先に watch を張ることで、
+    // スキャン中に新規到着したファイルも取りこぼさない（既存分と二重に
+    // 投入されても、router 側のデバウンスが同一パスを 1 件に束ねる）。
+    if scan_on_start {
+        spawn_startup_scan(watch_map.clone(), scan_tx, Arc::clone(&log));
+    } else {
+        drop(scan_tx);
+    }
+
     let (compiled_rules, rule_log_handles) = crate::router::compile_rules(rules)?;
     crate::router::run_router(rx, &compiled_rules, retry, Arc::clone(&log)).await?;
 
@@ -137,3 +152,100 @@ pub async fn start_watching(
     }
     Ok(())
 }
+
+/// 監視対象に既に存在するエントリを列挙し、Create イベントに変換する。
+///
+/// 各監視ルートを、その登録モード（recursive / non-recursive）と同じ深さで走査する。
+/// ルート自身は除外（min_depth=1）。実際にどのルールが処理するか（patterns / events=
+/// create を含むか等）は router の `evaluate_rule` が最終判定するため、ここでは
+/// 種別（File/Folder）だけ付けて素直に列挙する。
+///
+/// 戻り値の第 2 要素は走査中に発生したエラー（権限不足・走査中に消えたパス等）の
+/// メッセージ一覧。本機能は「サイレント脱落を防ぐ」のが目的なので、走査エラーも
+/// 握り潰さず呼び出し側へ返してログに出せるようにする。
+fn collect_existing_events(
+    watch_map: &HashMap<PathBuf, RecursiveMode>,
+) -> (Vec<Event>, Vec<String>) {
+    let mut events = Vec::new();
+    let mut errors = Vec::new();
+    for (path, mode) in watch_map {
+        let recursive = matches!(mode, RecursiveMode::Recursive);
+        let mut walker = WalkDir::new(path).min_depth(1);
+        if !recursive {
+            walker = walker.max_depth(1);
+        }
+        for result in walker.into_iter() {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(e) => {
+                    errors.push(e.to_string());
+                    continue;
+                }
+            };
+            let kind = if entry.file_type().is_dir() {
+                EventKind::Create(CreateKind::Folder)
+            } else {
+                EventKind::Create(CreateKind::File)
+            };
+            events.push(Event::new(kind).add_path(entry.path().to_path_buf()));
+        }
+    }
+    (events, errors)
+}
+
+/// 起動時スキャンを別スレッドで実行し、既存エントリを検知チャネルへ投入する。
+///
+/// walkdir は同期 API なので、tokio ランタイムをブロックしないよう専用スレッドで回し、
+/// 監視コールバックと同じ `blocking_send`（容量超過時は router の排出待ちで自然に
+/// バックプレッシャ）でチャネルへ送る。
+fn spawn_startup_scan(
+    watch_map: HashMap<PathBuf, RecursiveMode>,
+    tx: mpsc::Sender<notify::Result<Event>>,
+    log: Arc<Logger>,
+) {
+    // スレッド生成自体に失敗した場合に備え、エラー報告用のハンドルを別に持っておく。
+    let log_for_spawn_err = Arc::clone(&log);
+    let spawn_result = std::thread::Builder::new()
+        .name("cat-watcher startup scan".to_string())
+        .spawn(move || {
+            let (events, errors) = collect_existing_events(&watch_map);
+            let total = events.len();
+            let mut sent = 0usize;
+            for ev in events {
+                // 受信側（router）が終了していたら打ち切る。
+                if tx.blocking_send(Ok(ev)).is_err() {
+                    break;
+                }
+                sent += 1;
+            }
+            if total > 0 {
+                log.info(format!(
+                    "起動時スキャン: 既存エントリ {sent} 件を検知キューに投入しました"
+                ));
+            }
+            // 走査できなかったエントリを握り潰さず、件数と代表例を残す。
+            if !errors.is_empty() {
+                let sample = errors
+                    .iter()
+                    .take(3)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                log.warn(format!(
+                    "起動時スキャン: {} 件のエントリを走査できませんでした（取りこぼしの可能性あり。例: {})",
+                    errors.len(),
+                    sample
+                ));
+            }
+        });
+
+    if let Err(e) = spawn_result {
+        log_for_spawn_err.error(format!(
+            "起動時スキャンのスレッド生成に失敗しました（既存ファイルは処理されません）: {e}"
+        ));
+    }
+}
+
+#[cfg(test)]
+#[path = "watcher_tests.rs"]
+mod tests;
