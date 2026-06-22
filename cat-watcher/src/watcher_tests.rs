@@ -32,13 +32,14 @@ fn recursive_scan_lists_all_files_and_dirs_excluding_root() {
     let mut map = HashMap::new();
     map.insert(root.clone(), RecursiveMode::Recursive);
 
-    let events = collect_existing_events(&map);
+    let (events, errors) = collect_existing_events(&map);
     let (files, dirs) = paths_and_dirs(&events);
 
     assert_eq!(files, vec!["a.txt".to_string(), "b.txt".to_string()]);
     assert_eq!(dirs, vec!["sub".to_string()]);
     // ルート自身は列挙されない
     assert!(events.iter().all(|e| e.paths[0] != root));
+    assert!(errors.is_empty());
 }
 
 #[test]
@@ -52,7 +53,7 @@ fn non_recursive_scan_stays_at_top_level() {
     let mut map = HashMap::new();
     map.insert(root.clone(), RecursiveMode::NonRecursive);
 
-    let events = collect_existing_events(&map);
+    let (events, _errors) = collect_existing_events(&map);
     let (files, dirs) = paths_and_dirs(&events);
 
     // 直下の top.txt と sub のみ。配下の deep.txt は含まれない。
@@ -65,7 +66,23 @@ fn empty_dir_yields_no_events() {
     let dir = tempdir().unwrap();
     let mut map = HashMap::new();
     map.insert(dir.path().to_path_buf(), RecursiveMode::Recursive);
-    assert!(collect_existing_events(&map).is_empty());
+    let (events, errors) = collect_existing_events(&map);
+    assert!(events.is_empty());
+    assert!(errors.is_empty());
+}
+
+#[test]
+fn missing_watch_root_is_reported_as_error_not_swallowed() {
+    // 存在しない監視ルート → walkdir がエラーを返す。
+    // 握り潰さず errors として返ってくること（サイレント脱落防止）。
+    let dir = tempdir().unwrap();
+    let missing = dir.path().join("does-not-exist");
+    let mut map = HashMap::new();
+    map.insert(missing, RecursiveMode::Recursive);
+
+    let (events, errors) = collect_existing_events(&map);
+    assert!(events.is_empty());
+    assert!(!errors.is_empty(), "走査エラーは errors に載るべき");
 }
 
 #[test]
@@ -76,7 +93,7 @@ fn all_emitted_events_are_create() {
     let mut map = HashMap::new();
     map.insert(root, RecursiveMode::Recursive);
 
-    let events = collect_existing_events(&map);
+    let (events, _errors) = collect_existing_events(&map);
     assert!(!events.is_empty());
     assert!(events
         .iter()

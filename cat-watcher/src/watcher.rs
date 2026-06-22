@@ -159,15 +159,29 @@ pub async fn start_watching(
 /// ルート自身は除外（min_depth=1）。実際にどのルールが処理するか（patterns / events=
 /// create を含むか等）は router の `evaluate_rule` が最終判定するため、ここでは
 /// 種別（File/Folder）だけ付けて素直に列挙する。
-fn collect_existing_events(watch_map: &HashMap<PathBuf, RecursiveMode>) -> Vec<Event> {
+///
+/// 戻り値の第 2 要素は走査中に発生したエラー（権限不足・走査中に消えたパス等）の
+/// メッセージ一覧。本機能は「サイレント脱落を防ぐ」のが目的なので、走査エラーも
+/// 握り潰さず呼び出し側へ返してログに出せるようにする。
+fn collect_existing_events(
+    watch_map: &HashMap<PathBuf, RecursiveMode>,
+) -> (Vec<Event>, Vec<String>) {
     let mut events = Vec::new();
+    let mut errors = Vec::new();
     for (path, mode) in watch_map {
         let recursive = matches!(mode, RecursiveMode::Recursive);
         let mut walker = WalkDir::new(path).min_depth(1);
         if !recursive {
             walker = walker.max_depth(1);
         }
-        for entry in walker.into_iter().filter_map(|e| e.ok()) {
+        for result in walker.into_iter() {
+            let entry = match result {
+                Ok(entry) => entry,
+                Err(e) => {
+                    errors.push(e.to_string());
+                    continue;
+                }
+            };
             let kind = if entry.file_type().is_dir() {
                 EventKind::Create(CreateKind::Folder)
             } else {
@@ -176,7 +190,7 @@ fn collect_existing_events(watch_map: &HashMap<PathBuf, RecursiveMode>) -> Vec<E
             events.push(Event::new(kind).add_path(entry.path().to_path_buf()));
         }
     }
-    events
+    (events, errors)
 }
 
 /// 起動時スキャンを別スレッドで実行し、既存エントリを検知チャネルへ投入する。
@@ -189,10 +203,12 @@ fn spawn_startup_scan(
     tx: mpsc::Sender<notify::Result<Event>>,
     log: Arc<Logger>,
 ) {
-    let _ = std::thread::Builder::new()
+    // スレッド生成自体に失敗した場合に備え、エラー報告用のハンドルを別に持っておく。
+    let log_for_spawn_err = Arc::clone(&log);
+    let spawn_result = std::thread::Builder::new()
         .name("cat-watcher startup scan".to_string())
         .spawn(move || {
-            let events = collect_existing_events(&watch_map);
+            let (events, errors) = collect_existing_events(&watch_map);
             let total = events.len();
             let mut sent = 0usize;
             for ev in events {
@@ -207,7 +223,27 @@ fn spawn_startup_scan(
                     "起動時スキャン: 既存エントリ {sent} 件を検知キューに投入しました"
                 ));
             }
+            // 走査できなかったエントリを握り潰さず、件数と代表例を残す。
+            if !errors.is_empty() {
+                let sample = errors
+                    .iter()
+                    .take(3)
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(" | ");
+                log.warn(format!(
+                    "起動時スキャン: {} 件のエントリを走査できませんでした（取りこぼしの可能性あり。例: {})",
+                    errors.len(),
+                    sample
+                ));
+            }
         });
+
+    if let Err(e) = spawn_result {
+        log_for_spawn_err.error(format!(
+            "起動時スキャンのスレッド生成に失敗しました（既存ファイルは処理されません）: {e}"
+        ));
+    }
 }
 
 #[cfg(test)]
