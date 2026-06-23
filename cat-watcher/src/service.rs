@@ -128,6 +128,19 @@ fn run_watcher(
 
         log.info("Windowsサービスとして起動しました".to_string());
 
+        // サービスは既定で SYSTEM 権限で動くため、設定が有効なら外部プロセス
+        // （command / execute）をアクティブなログオンユーザー権限で起動する。
+        // ログオンユーザーがいなければサービスアカウント権限へフォールバックする。
+        let run_as_user = global_config.run_as_logged_in_user();
+        crate::win_runas::set_enabled(run_as_user);
+        if run_as_user {
+            log.info(
+                "外部プロセスはアクティブなログオンユーザー権限で実行します（ログオンユーザー不在時はサービス権限）".to_string(),
+            );
+        } else {
+            log.info("外部プロセスはサービスアカウント権限で実行します".to_string());
+        }
+
         // ダッシュボード（既定で同梱）。サービス常駐でもブラウザから閲覧できるよう、
         // CLI 起動と同じ共通入口でローカル HTTP/SSE サーバを起動する。
         #[cfg(feature = "dashboard")]

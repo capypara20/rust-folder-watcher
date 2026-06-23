@@ -82,6 +82,41 @@ fn test_parse_global_config() {
 	assert_eq!(config.retry.interval_ms, 1000);
 	assert_eq!(config.system_log.dir, dir_path);
 	assert!(config.system_log.console);
+	// [service] セクション省略時はログオンユーザー権限実行が既定 ON。
+	assert!(config.service.is_none());
+	assert!(config.run_as_logged_in_user());
+}
+
+#[test]
+fn test_parse_service_section() {
+	let dir = tempdir().unwrap();
+	let dir_path = sanitize_path(dir.path());
+	let make = |body: &str| format!(r#"
+		[retry]
+		count = 1
+		interval_ms = 500
+
+		[system_log]
+		dir = "{dir_path}"
+		file_name = "system.log"
+		rotation = "daily"
+		level = "info"
+
+		{body}
+	"#);
+
+	// run_as_logged_in_user を明示的に false にできる。
+	let off: GlobalConfig = toml::from_str(&make("[service]\nrun_as_logged_in_user = false")).unwrap();
+	assert!(!off.run_as_logged_in_user());
+
+	// [service] はあるが値を省略すると既定 true。
+	let default_on: GlobalConfig = toml::from_str(&make("[service]")).unwrap();
+	assert!(default_on.run_as_logged_in_user());
+
+	// 未知キーは deny_unknown_fields で弾く。
+	let unknown: Result<GlobalConfig, _> =
+		toml::from_str(&make("[service]\nrun_as_admin = true"));
+	assert!(unknown.is_err());
 }
 
 #[test]
@@ -167,6 +202,7 @@ fn make_global(dir: &str, file_name: &str) -> GlobalConfig {
 		},
 		dashboard: None,
 		startup_scan: None,
+		service: None,
 	}
 }
 

@@ -34,6 +34,16 @@ enabled = true
 enabled = false
 bind    = "127.0.0.1:8080"        # 待ち受けアドレス
 history = 200                     # 接続時にブラウザへ再生する直近件数
+
+# ─── Windows サービス設定 ─────────────────────────────────────────────
+# Windows サービスとして常駐したときの挙動。CLI 起動では参照されません。
+# run_as_logged_in_user = true のとき、command / execute で起動する外部プロセス
+# （PowerShell・7-Zip など）を「アクティブなログオンユーザー」の権限で実行します。
+# サービスは既定で SYSTEM 権限で動くため、これを無効にすると外部プロセスも
+# SYSTEM 権限を継承します。誰もログオンしていない状態では自動的にサービス
+# アカウント権限へフォールバックします。
+[service]
+run_as_logged_in_user = true
 "#;
 
 pub const RULES_TOML: &str = r#"[[rules]]

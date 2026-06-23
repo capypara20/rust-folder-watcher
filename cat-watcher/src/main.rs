@@ -20,6 +20,8 @@ mod router;
 mod service;
 mod templates;
 mod watcher;
+#[cfg(windows)]
+mod win_runas;
 
 const AFTER_LONG_HELP: &str = "\
 \x1b[33;1m▶ 使い方\x1b[0m

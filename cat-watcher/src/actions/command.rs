@@ -1,9 +1,8 @@
-use std::process::Stdio;
-
 use crate::config::ActionConfig;
 use crate::error::AppError;
 use crate::placeholder::{expand_placeholders, PlaceholderContext};
 
+use super::spawn::spawn_detached;
 use super::ActionSink;
 
 pub async fn execute(
@@ -28,14 +27,9 @@ pub async fn execute(
         .as_deref()
         .filter(|s| !s.is_empty());
 
-    let mut cmd = build_shell_command(shell, &expanded)?;
-    cmd.stdout(Stdio::null()).stderr(Stdio::null());
+    let (program, args) = build_shell_command(shell, &expanded)?;
 
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    cmd.spawn().map_err(|e| {
+    spawn_detached(&program, &args, working_dir).map_err(|e| {
         AppError::Action(format!(
             "command: プロセス起動失敗 (shell={shell} cmd={expanded}): {e}"
         ))
@@ -45,42 +39,45 @@ pub async fn execute(
     Ok(())
 }
 
-fn build_shell_command(
-    shell: &str,
-    expanded: &str,
-) -> Result<tokio::process::Command, AppError> {
+/// シェル種別から、起動するプログラムとその引数を組み立てる。
+fn build_shell_command(shell: &str, expanded: &str) -> Result<(String, Vec<String>), AppError> {
     match shell {
-        "cmd" => {
-            let mut c = tokio::process::Command::new("cmd.exe");
-            c.args(["/C", expanded]);
-            Ok(c)
-        }
-        "powershell" => {
-            let mut c = tokio::process::Command::new("powershell.exe");
-            c.args(["-NoProfile", "-Command", expanded]);
-            Ok(c)
-        }
+        "cmd" => Ok((
+            "cmd.exe".to_string(),
+            vec!["/C".to_string(), expanded.to_string()],
+        )),
+        "powershell" => Ok((
+            "powershell.exe".to_string(),
+            vec![
+                "-NoProfile".to_string(),
+                "-Command".to_string(),
+                expanded.to_string(),
+            ],
+        )),
         "pwsh" => {
             #[cfg(windows)]
             let bin = "pwsh.exe";
             #[cfg(not(windows))]
             let bin = "pwsh";
-            let mut c = tokio::process::Command::new(bin);
-            c.args(["-NoProfile", "-Command", expanded]);
-            Ok(c)
+            Ok((
+                bin.to_string(),
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    expanded.to_string(),
+                ],
+            ))
         }
         #[cfg(not(windows))]
-        "bash" => {
-            let mut c = tokio::process::Command::new("bash");
-            c.args(["-c", expanded]);
-            Ok(c)
-        }
+        "bash" => Ok((
+            "bash".to_string(),
+            vec!["-c".to_string(), expanded.to_string()],
+        )),
         #[cfg(not(windows))]
-        "sh" => {
-            let mut c = tokio::process::Command::new("sh");
-            c.args(["-c", expanded]);
-            Ok(c)
-        }
+        "sh" => Ok((
+            "sh".to_string(),
+            vec!["-c".to_string(), expanded.to_string()],
+        )),
         other => Err(AppError::Action(format!(
             "command: 不明なシェル '{other}'。{} のいずれかを指定してください",
             if cfg!(windows) {
