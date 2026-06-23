@@ -132,7 +132,7 @@ fn run_watcher(
         // （command / execute）をアクティブなログオンユーザー権限で起動する。
         // ログオンユーザーがいなければサービスアカウント権限へフォールバックする。
         let run_as_user = global_config.run_as_logged_in_user();
-        crate::win_runas::set_enabled(run_as_user);
+        crate::platform::win_runas::set_enabled(run_as_user);
         if run_as_user {
             log.info(
                 "外部プロセスはアクティブなログオンユーザー権限で実行します（ログオンユーザー不在時はサービス権限）".to_string(),

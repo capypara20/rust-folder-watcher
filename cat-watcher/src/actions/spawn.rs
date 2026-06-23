@@ -16,7 +16,7 @@ pub fn spawn_detached(
 ) -> Result<(), String> {
     #[cfg(windows)]
     {
-        use crate::win_runas::{self, RunAsResult};
+        use crate::platform::win_runas::{self, RunAsResult};
         if win_runas::enabled() {
             match win_runas::spawn_as_active_user(program, args, working_dir) {
                 RunAsResult::Spawned => return Ok(()),
