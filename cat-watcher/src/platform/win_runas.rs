@@ -219,5 +219,5 @@ fn append_quoted(arg: &str, cmd: &mut Vec<u16>) {
 }
 
 #[cfg(test)]
-#[path = "win_runas_tests.rs"]
+#[path = "../tests/win_runas.rs"]
 mod tests;

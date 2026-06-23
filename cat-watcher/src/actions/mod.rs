@@ -5,9 +5,6 @@ pub mod execute;
 pub mod r#move;
 mod spawn;
 
-#[cfg(test)]
-pub(crate) mod test_support;
-
 use std::path::Path;
 use std::sync::Arc;
 

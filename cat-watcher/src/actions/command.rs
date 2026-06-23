@@ -90,5 +90,5 @@ fn build_shell_command(shell: &str, expanded: &str) -> Result<(String, Vec<Strin
 }
 
 #[cfg(test)]
-#[path = "command_tests.rs"]
+#[path = "../tests/actions_command.rs"]
 mod tests;

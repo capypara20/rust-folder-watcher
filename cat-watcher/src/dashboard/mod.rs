@@ -131,5 +131,5 @@ pub fn start(global: &crate::config::GlobalConfig, rules: &[crate::config::Rule]
 }
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "../tests/dashboard.rs"]
 mod tests;

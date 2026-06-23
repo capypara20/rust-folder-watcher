@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use tempfile::tempdir;
 
-use super::ActionSink;
+use crate::actions::ActionSink;
 use crate::config::{ActionConfig, ActionType, LogRotation, RetryConfig};
 use crate::logger::Logger;
 

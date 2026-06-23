@@ -23,5 +23,5 @@ use crate::error::AppError;
 use validate::{collect_action_errors, finish_validation, static_root_of_destination};
 
 #[cfg(test)]
-#[path = "tests.rs"]
+#[path = "../tests/config.rs"]
 mod tests;

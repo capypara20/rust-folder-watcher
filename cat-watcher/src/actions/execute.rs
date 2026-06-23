@@ -42,5 +42,5 @@ pub async fn execute(
 }
 
 #[cfg(test)]
-#[path = "execute_tests.rs"]
+#[path = "../tests/actions_execute.rs"]
 mod tests;
