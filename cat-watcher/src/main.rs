@@ -14,14 +14,12 @@ mod csv_import;
 mod dashboard;
 mod error;
 mod logger;
+#[cfg(windows)]
+mod platform;
 mod placeholder;
 mod router;
-#[cfg(windows)]
-mod service;
 mod templates;
 mod watcher;
-#[cfg(windows)]
-mod win_runas;
 
 const AFTER_LONG_HELP: &str = "\
 \x1b[33;1m▶ 使い方\x1b[0m
@@ -102,7 +100,7 @@ fn main() {
     // StartServiceCtrlDispatcherW は tokio ランタイム生成より先に
     // メインスレッドから直接呼ぶ必要がある（エラー1053回避）
     #[cfg(windows)]
-    if service::try_run_as_service() {
+    if platform::service::try_run_as_service() {
         return;
     }
 
