@@ -1,0 +1,14 @@
+# Windows(MSVC) ビルドでは C ランタイム(CRT)を実行ファイルに静的リンクする。
+#
+# 既定の動的リンクだと、実行する PC 側に Visual C++ 再頒布可能パッケージ
+# (VCRUNTIME140.dll / MSVCP140.dll など) が必要になり、まっさらな Windows では
+# 「VCRUNTIME140.dll が見つからない」エラーで起動できない。
+# crt-static を付けるとランタイムが exe に同梱され、追加インストール不要で
+# どの Windows でも単体で動く（実行ファイルは少し大きくなる）。
+#
+# scope は MSVC ターゲットのみ。Linux(gnu) では crt-static は glibc の静的リンクを
+# 意味し望ましくないため、cfg で Windows/MSVC に限定する。
+# blake3 等の C コードをビルドする cc クレートもこのフラグを検知して /MT を使うため、
+# Rust 側と C 側で CRT のリンク方式が揃う。
+[target.'cfg(target_env = "msvc")']
+rustflags = ["-C", "target-feature=+crt-static"]
