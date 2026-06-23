@@ -1,10 +1,19 @@
 name: CI
 
+# 無駄打ち削減: 毎プッシュでは回さず、PR（作成/更新）と main への push のみで実行する。
+# - ブランチへの中間 WIP プッシュでは走らない（PR を開けば検証される）。
+# - ドキュメントのみの変更（*.md / doc/）は重いビルド/テストをスキップする。
 on:
-  push:
-    branches-ignore:
-      - main
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'doc/**'
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+      - 'doc/**'
 
 permissions:
   contents: read
