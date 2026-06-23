@@ -28,7 +28,15 @@ serde_json = { version = "1", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.6"
-windows-sys = { version = "0.60", features = ["Win32_System_Console", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.60", features = [
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Environment",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+] }
 
 [build-dependencies]
 winres = "0.1"

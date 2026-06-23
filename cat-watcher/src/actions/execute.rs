@@ -1,9 +1,8 @@
-use std::process::Stdio;
-
 use crate::config::ActionConfig;
 use crate::error::AppError;
 use crate::placeholder::{expand_placeholders, PlaceholderContext};
 
+use super::spawn::spawn_detached;
 use super::ActionSink;
 
 pub async fn execute(
@@ -32,16 +31,7 @@ pub async fn execute(
         .as_deref()
         .filter(|s| !s.is_empty());
 
-    let mut cmd = tokio::process::Command::new(program);
-    cmd.args(&expanded_args)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-
-    if let Some(dir) = working_dir {
-        cmd.current_dir(dir);
-    }
-
-    cmd.spawn().map_err(|e| {
+    spawn_detached(program, &expanded_args, working_dir).map_err(|e| {
         AppError::Action(format!(
             "execute: プロセス起動失敗 (program={program} args={expanded_args:?}): {e}"
         ))

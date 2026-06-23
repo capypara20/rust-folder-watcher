@@ -3,6 +3,7 @@ pub mod common;
 pub mod copy;
 pub mod execute;
 pub mod r#move;
+mod spawn;
 
 #[cfg(test)]
 pub(crate) mod test_support;

@@ -104,6 +104,12 @@ pub struct GlobalConfig {
     /// 起動時スキャン設定（省略可）。未指定なら有効（既定 ON）。
     #[serde(default)]
     pub startup_scan: Option<StartupScanConfig>,
+    /// Windows サービス設定（省略可）。未指定なら既定値を使う。
+    // service フィールドは Windows のサービス起動経路でのみ参照するため、
+    // 非 Windows ビルドでは未使用になる。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    #[serde(default)]
+    pub service: Option<ServiceConfig>,
 }
 
 impl GlobalConfig {
@@ -116,6 +122,36 @@ impl GlobalConfig {
             .map(|s| s.enabled)
             .unwrap_or(true)
     }
+
+    /// Windows サービス起動時に、外部プロセス（command / execute）を
+    /// アクティブなログオンユーザーの権限で実行するか。セクション未指定なら
+    /// 有効（既定 ON）。ログオンユーザーがいない場合はサービスアカウント
+    /// 権限へフォールバックする。CLI 起動時はこの設定に関係なく、元々
+    /// ログオンユーザー権限で動作する。
+    // 参照するのは Windows のサービス起動経路のみ。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub fn run_as_logged_in_user(&self) -> bool {
+        self.service
+            .as_ref()
+            .map(|s| s.run_as_logged_in_user)
+            .unwrap_or(true)
+    }
+}
+
+/// Windows サービス設定。サービスとして常駐する場合の挙動を制御する。
+/// CLI 起動時には参照されない。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceConfig {
+    /// サービス起動時に外部プロセスをアクティブなログオンユーザー権限で実行するか。
+    /// サービスは既定で SYSTEM 権限で動くため、PowerShell / 7-Zip などの外部
+    /// プロセスがログオンユーザーの環境で動かず不便なことへの対策。
+    /// ログオンユーザーがいない（誰もログオンせずサービス起動した）場合は
+    /// サービスアカウント権限で起動する。
+    // 値を読むのは Windows のサービス起動経路のみ。
+    #[cfg_attr(not(windows), allow(dead_code))]
+    #[serde(default = "default_true")]
+    pub run_as_logged_in_user: bool,
 }
 
 /// 起動時スキャン設定。起動直後に監視フォルダを 1 度だけ走査し、
