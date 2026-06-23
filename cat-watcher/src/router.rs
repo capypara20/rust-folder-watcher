@@ -429,5 +429,5 @@ pub async fn run_router(
 }
 
 #[cfg(test)]
-#[path = "router_tests.rs"]
+#[path = "tests/router.rs"]
 mod tests;

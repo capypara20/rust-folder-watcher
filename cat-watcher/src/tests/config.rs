@@ -1,5 +1,5 @@
 use super::*;
-use crate::actions::test_support::base_action;
+use crate::test_support::base_action;
 use tempfile::tempdir;
 
 fn sanitize_path(path: &std::path::Path) -> String {

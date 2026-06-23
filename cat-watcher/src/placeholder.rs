@@ -119,5 +119,5 @@ pub fn validate_placeholders(
 }
 
 #[cfg(test)]
-#[path = "placeholder_tests.rs"]
+#[path = "tests/placeholder.rs"]
 mod tests;

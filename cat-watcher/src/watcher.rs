@@ -247,5 +247,5 @@ fn spawn_startup_scan(
 }
 
 #[cfg(test)]
-#[path = "watcher_tests.rs"]
+#[path = "tests/watcher.rs"]
 mod tests;

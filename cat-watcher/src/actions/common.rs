@@ -93,5 +93,5 @@ pub async fn walk_files(src_dir: &Path) -> Result<Vec<PathBuf>, AppError> {
 }
 
 #[cfg(test)]
-#[path = "common_tests.rs"]
+#[path = "../tests/actions_common.rs"]
 mod tests;

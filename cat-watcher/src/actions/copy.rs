@@ -159,5 +159,5 @@ async fn copy_directory_recursive(
 }
 
 #[cfg(test)]
-#[path = "copy_tests.rs"]
+#[path = "../tests/actions_copy.rs"]
 mod tests;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::actions::test_support::write_file;
+use crate::test_support::write_file;
 use tempfile::tempdir;
 
 #[tokio::test]

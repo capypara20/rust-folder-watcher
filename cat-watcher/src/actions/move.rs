@@ -220,5 +220,5 @@ fn windows_is_cross_device(_e: &std::io::Error) -> bool {
 }
 
 #[cfg(test)]
-#[path = "move_tests.rs"]
+#[path = "../tests/actions_move.rs"]
 mod tests;

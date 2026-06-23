@@ -1,5 +1,5 @@
 use super::*;
-use crate::actions::test_support::{base_action, make_sink};
+use crate::test_support::{base_action, make_sink};
 use crate::config::ActionType;
 use tempfile::tempdir;
 

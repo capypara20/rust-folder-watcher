@@ -21,6 +21,11 @@ mod router;
 mod templates;
 mod watcher;
 
+// テスト共通ヘルパー（テスト本体は src/tests/ に集約）。
+#[cfg(test)]
+#[path = "tests/support.rs"]
+mod test_support;
+
 const AFTER_LONG_HELP: &str = "\
 \x1b[33;1m▶ 使い方\x1b[0m
   監視の起動:
