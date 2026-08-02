@@ -90,6 +90,13 @@ pub async fn execute_chain(
         let index = i + 1;
         let step = (index, total);
 
+        // delay_ms が設定されていれば、このアクションの直前で待つ。
+        // 書き込みが終わりきらないうちにコピーが走るのを避けたいとき等に使う。
+        if let Some(delay) = action.delay_ms.filter(|ms| *ms > 0) {
+            sink.note(index, total, format!("delay_ms={delay} のため待機します"));
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+
         let result: Result<Option<std::path::PathBuf>, AppError> = match action.type_ {
             ActionType::Copy => {
                 let dest_str = action.destination.as_deref().unwrap_or("");

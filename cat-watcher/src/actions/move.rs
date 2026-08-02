@@ -7,9 +7,14 @@ use crate::error::AppError;
 use crate::placeholder::PlaceholderContext;
 
 use super::common::{
-    expand_action_destination, resolve_dest_path, try_copy_once, walk_files,
+    ensure_dest_dir, ensure_parent_dir, expand_action_destination, resolve_dest_path,
+    try_copy_once, walk_entries, TransferOptions,
 };
+use super::copy::{relative_to, resolve_folder_dest};
 use super::ActionSink;
+
+/// エラーメッセージ内でこのアクションを指す表記。
+const LABEL: &str = "移動先";
 
 /// move アクションのエントリポイント。
 /// 戻り値:
@@ -25,28 +30,14 @@ pub async fn execute(
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
     let dest_root = expand_action_destination(action, ctx)?;
-
-    let overwrite = action.overwrite.unwrap_or(false);
-    let preserve_structure = action.preserve_structure.unwrap_or(false);
-    let verify_integrity = action.verify_integrity.unwrap_or(false);
+    let opts = TransferOptions::from_action(action);
     let watch_path = Path::new(&ctx.watch_path);
 
     if src.is_dir() {
-        move_directory_recursive(
-            src,
-            &dest_root,
-            watch_path,
-            overwrite,
-            preserve_structure,
-            verify_integrity,
-            retry,
-            sink,
-            step,
-        )
-        .await
+        move_directory_recursive(src, &dest_root, watch_path, opts, retry, sink, step).await
     } else {
-        let dest_file = resolve_dest_path(src, &dest_root, watch_path, preserve_structure)?;
-        move_one_file(src, &dest_file, overwrite, verify_integrity, retry, sink, step).await
+        let dest_file = resolve_dest_path(src, &dest_root, watch_path, opts.preserve_structure)?;
+        move_one_file(src, &dest_file, opts, retry, sink, step).await
     }
 }
 
@@ -54,13 +45,12 @@ pub async fn execute(
 async fn move_one_file(
     src: &Path,
     dest: &Path,
-    overwrite: bool,
-    verify_integrity: bool,
+    opts: TransferOptions,
     retry: &RetryConfig,
     sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
-    if dest.exists() && !overwrite {
+    if dest.exists() && !opts.overwrite {
         sink.warn(step.0, step.1, format!(
             "move スキップ (overwrite=false で既存): {}",
             dest.display()
@@ -68,15 +58,7 @@ async fn move_one_file(
         return Ok(None);
     }
 
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            AppError::Action(format!(
-                "移動先のディレクトリの作成に失敗 ({}): {}",
-                parent.display(),
-                e
-            ))
-        })?;
-    }
+    ensure_parent_dir(dest, opts.auto_create, LABEL).await?;
 
     // まず rename を試みる（同一ボリューム）
     match tokio::fs::rename(src, dest).await {
@@ -105,7 +87,7 @@ async fn move_one_file(
     let interval = Duration::from_millis(retry.interval_ms);
 
     for attempt in 1..=max_attempts {
-        match try_copy_once(src, dest, verify_integrity).await {
+        match try_copy_once(src, dest, opts.verify_integrity).await {
             Ok(maybe_hash) => {
                 tokio::fs::remove_file(src).await.map_err(|e| {
                     AppError::Action(format!(
@@ -145,47 +127,50 @@ async fn move_one_file(
     unreachable!("リトライループは必ず return で抜ける");
 }
 
-/// ディレクトリ再帰移動。配下ファイルを 1 つずつ move_one_file に流し、最後に空ディレクトリを削除する。
-#[allow(clippy::too_many_arguments)]
+/// ディレクトリ再帰移動。
+///
+/// 空のサブフォルダも宛先に再現してから、配下ファイルを 1 つずつ移動する。
+/// 最後に移動元を削除するが、`overwrite = false` で 1 件でもスキップした場合は
+/// **削除しない**（移動できていないファイルを消してしまわないため）。
 async fn move_directory_recursive(
     src_dir: &Path,
     dest_root: &Path,
     watch_path: &Path,
-    overwrite: bool,
-    preserve_structure: bool,
-    verify_integrity: bool,
+    opts: TransferOptions,
     retry: &RetryConfig,
     sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
-    let folder_dest = if preserve_structure {
-        let rel = src_dir
-            .strip_prefix(watch_path)
-            .map_err(|e| AppError::Action(format!("relative_path の解決に失敗: {}", e)))?;
-        dest_root.join(rel)
-    } else {
-        let folder_name = src_dir
-            .file_name()
-            .ok_or_else(|| AppError::Action("フォルダ名の取得に失敗".to_string()))?;
-        dest_root.join(folder_name)
-    };
+    let folder_dest = resolve_folder_dest(src_dir, dest_root, watch_path, opts.preserve_structure)?;
+    ensure_dest_dir(&folder_dest, opts.auto_create, LABEL).await?;
 
-    tokio::fs::create_dir_all(&folder_dest).await.map_err(|e| {
-        AppError::Action(format!(
-            "移動先フォルダ作成失敗 ({}): {}",
-            folder_dest.display(),
-            e
-        ))
-    })?;
+    let (dirs, files) = walk_entries(src_dir).await?;
 
-    let entries = walk_files(src_dir).await?;
+    // 中身が空のサブフォルダも移動先に残すため、先にディレクトリ構造だけ作る。
+    for dir in &dirs {
+        let rel = relative_to(dir, src_dir)?;
+        ensure_dest_dir(&folder_dest.join(rel), opts.auto_create, LABEL).await?;
+    }
 
-    for entry in &entries {
-        let rel = entry
-            .strip_prefix(src_dir)
-            .map_err(|e| AppError::Action(format!("配下相対パス解決失敗: {}", e)))?;
+    let mut skipped = 0usize;
+    for entry in &files {
+        let rel = relative_to(entry, src_dir)?;
         let entry_dest = folder_dest.join(rel);
-        move_one_file(entry, &entry_dest, overwrite, verify_integrity, retry, sink, step).await?;
+        if move_one_file(entry, &entry_dest, opts, retry, sink, step)
+            .await?
+            .is_none()
+        {
+            skipped += 1;
+        }
+    }
+
+    if skipped > 0 {
+        sink.warn(step.0, step.1, format!(
+            "移動元フォルダは削除しませんでした（overwrite=false でスキップしたファイルが {} 件残っています）: {}",
+            skipped,
+            src_dir.display()
+        ));
+        return Ok(Some(folder_dest));
     }
 
     tokio::fs::remove_dir_all(src_dir).await.map_err(|e| {
@@ -200,23 +185,18 @@ async fn move_directory_recursive(
 }
 
 /// エラーが cross-device（異ボリューム）起因かどうか判定する。
+///
+/// - Windows: 異なるボリューム間の `MoveFileW` は ERROR_NOT_SAME_DEVICE (17)。
+/// - Unix: EXDEV。どちらも Rust が `ErrorKind::CrossesDevices` に正規化する
+///   （生の errno も見るのは古い Rust / 想定外の経路への保険）。
+/// - `PermissionDenied`: ネットワーク共有をまたぐ移動で ERROR_ACCESS_DENIED が
+///   返ることがあるため、copy フォールバックの対象に含める。本当に権限が無ければ
+///   フォールバック先の copy も失敗するので、取りこぼしより誤判定を選んでいる。
 fn is_cross_device(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
         ErrorKind::CrossesDevices | ErrorKind::PermissionDenied
     ) || e.raw_os_error() == Some(17)
-        || e.raw_os_error() == Some(0x11)
-        || windows_is_cross_device(e)
-}
-
-#[cfg(target_os = "windows")]
-fn windows_is_cross_device(e: &std::io::Error) -> bool {
-    e.raw_os_error() == Some(17)
-}
-
-#[cfg(not(target_os = "windows"))]
-fn windows_is_cross_device(_e: &std::io::Error) -> bool {
-    false
 }
 
 #[cfg(test)]
