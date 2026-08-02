@@ -202,6 +202,8 @@ fn make_global(dir: &str, file_name: &str) -> GlobalConfig {
 		},
 		dashboard: None,
 		startup_scan: None,
+		destination: None,
+		detect: None,
 		service: None,
 	}
 }
@@ -559,20 +561,61 @@ fn test_validate_action_execute_required_fields() {
 // validate_action: destination の実在チェックとプレースホルダー
 // =========================================================
 
-#[test]
-fn test_validate_action_destination_existence() {
-	// 実在しない destination はエラー
-	let a = copy_like_action(ActionType::Copy, "C:/nonexistent_dest_xyz_99999");
-	assert!(validate_action(&a, "test").is_err());
+/// テスト用に auto_create を明示した copy アクションを作る。
+fn copy_action_with_auto_create(dest: &str, auto_create: bool) -> ActionConfig {
+	let mut a = copy_like_action(ActionType::Copy, dest);
+	a.auto_create = Some(auto_create);
+	a
+}
 
-	// destination 中の {Date} 以降はランタイム展開されるため、ルートだけ実在すれば OK
-	let dest_root = tempdir().unwrap();
-	let with_placeholder = format!("{}/{{Date}}/sub", sanitize_path(dest_root.path()));
-	let a = copy_like_action(ActionType::Copy, &with_placeholder);
+// auto_create = true（既定）: 宛先フォルダが無いだけならロードを通す (#68)。
+// 実行時に create_dir_all で掘られるため、事前に手で作らせる必要はない。
+#[test]
+fn test_destination_missing_dir_is_allowed_when_auto_create() {
+	let existing_root = tempdir().unwrap();
+	let root = sanitize_path(existing_root.path());
+
+	// 固定パス（プレースホルダーなし）でも、まだ存在しないだけなら OK
+	let a = copy_action_with_auto_create(&format!("{root}/not_yet/deeper"), true);
 	assert!(validate_action(&a, "test").is_ok());
 
-	// プレースホルダー前のルートが存在しなければエラー
-	let a = copy_like_action(ActionType::Copy, "C:/nonexistent_root_zzz_99999/{Date}");
+	// プレースホルダーありも同様
+	let a = copy_action_with_auto_create(&format!("{root}/{{Date}}/sub"), true);
+	assert!(validate_action(&a, "test").is_ok());
+
+	// 先頭からプレースホルダーで始まる場合は静的部分が無いので判定しない
+	let a = copy_action_with_auto_create("{WatchPath}/archive", true);
+	assert!(validate_action(&a, "test").is_ok());
+}
+
+// auto_create = true でも、先祖をたどって 1 つも実在しない宛先はエラー。
+// 未接続のドライブレターや綴り間違いの共有名を拾うための最低限のチェック。
+#[test]
+fn test_destination_without_existing_ancestor_is_error() {
+	let dest = if cfg!(windows) {
+		// 存在しないドライブレター
+		r"Q:\backup\{Date}"
+	} else {
+		"/nonexistent_root_zzz_99999/backup/{Date}"
+	};
+	let a = copy_action_with_auto_create(dest, true);
+	assert!(validate_action(&a, "test").is_err());
+}
+
+// auto_create = false: 従来どおり静的部分の実在を要求する。
+#[test]
+fn test_destination_existence_required_when_auto_create_disabled() {
+	let dest_root = tempdir().unwrap();
+	let root = sanitize_path(dest_root.path());
+
+	// 実在するフォルダなら OK
+	assert!(validate_action(&copy_action_with_auto_create(&root, false), "test").is_ok());
+	// {Date} の親が実在すれば OK
+	let a = copy_action_with_auto_create(&format!("{root}/{{Date}}/sub"), false);
+	assert!(validate_action(&a, "test").is_ok());
+
+	// まだ存在しない固定パスはエラー
+	let a = copy_action_with_auto_create(&format!("{root}/not_yet"), false);
 	assert!(validate_action(&a, "test").is_err());
 }
 
