@@ -40,6 +40,24 @@ fn kind_from_notify_event(event: &notify::Event) -> Option<EntryKind> {
     }
 }
 
+/// デバウンスの時間設定（global.toml の `[detect]` 由来）。
+#[derive(Clone, Copy)]
+pub struct DebounceTiming {
+    /// 最後のイベントからこの時間だけ静かになったら確定とみなす。
+    pub quiet: Duration,
+    /// 確定済みのパスが無いか確認する間隔。
+    pub poll: Duration,
+}
+
+impl DebounceTiming {
+    pub fn from_global(global: &crate::config::GlobalConfig) -> Self {
+        Self {
+            quiet: Duration::from_millis(global.debounce_ms()),
+            poll: Duration::from_millis(global.poll_interval_ms()),
+        }
+    }
+}
+
 pub struct CompiledRule{
 	pub name: String,
 	pub enabled: bool,
@@ -231,9 +249,57 @@ fn matches_target(path: &Path, target: &WatchTarget, kind: Option<EntryKind>) ->
     }
 }
 
-/// include_hidden フィルタ（Phase 12 まではスタブ）
-fn matches_hidden(_path: &Path, _include_hidden: bool) -> bool {
-    true  // 今は常に通過
+/// include_hidden フィルタ。
+///
+/// `include_hidden = true` なら何も除外しない。`false` のときだけ隠しエントリを弾く。
+/// 「隠し」の意味は OS の流儀に合わせる:
+///
+/// - Windows: `FILE_ATTRIBUTE_HIDDEN` 属性が付いているか
+///   （`desktop.ini` / `Thumbs.db` などは Explorer が自動的にこの属性を付ける）
+/// - Linux など: ファイル名が `.` で始まるか（ドットファイル慣習）
+///
+/// 判定するのは「そのエントリ自身」だけで、親フォルダまでは遡らない。
+/// つまり隠しフォルダ配下にある通常ファイルは処理対象として残る
+/// （doc/detailed-design.md §14.5 の仕様）。
+fn matches_hidden(path: &Path, include_hidden: bool) -> bool {
+    if include_hidden {
+        return true;
+    }
+    !is_hidden_entry(path)
+}
+
+/// Windows: `GetFileAttributesW` で隠し属性を確認する。
+///
+/// 削除イベントのようにパスが既に消えていると属性を取得できないが、その場合は
+/// 「隠しではない」とみなして処理対象に残す（取りこぼしを避ける安全側の倒し方）。
+#[cfg(windows)]
+fn is_hidden_entry(path: &Path) -> bool {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW, FILE_ATTRIBUTE_HIDDEN, INVALID_FILE_ATTRIBUTES,
+    };
+
+    // Win32 API に渡すため、末尾に NUL を付けた UTF-16 文字列へ変換する。
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+
+    // SAFETY: wide は NUL 終端された有効な UTF-16 バッファ。
+    let attrs = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    if attrs == INVALID_FILE_ATTRIBUTES {
+        return false;
+    }
+    attrs & FILE_ATTRIBUTE_HIDDEN != 0
+}
+
+/// Windows 以外: ファイル名が `.` で始まるものを隠し扱いする。
+#[cfg(not(windows))]
+fn is_hidden_entry(path: &Path) -> bool {
+    path.file_name()
+        .map(|name| name.to_string_lossy().starts_with('.'))
+        .unwrap_or(false)
 }
 
 /// patterns / exclude_patterns / regex / exclude_dir_* マッチ
@@ -335,12 +401,13 @@ pub async fn run_router(
     mut rx: mpsc::Receiver<notify::Result<notify::Event>>,
     compiled_rules: &[CompiledRule],
     retry: &RetryConfig,
+    timing: DebounceTiming,
     log: Arc<Logger>,
 ) -> Result<(), AppError> {
     // デバウンス用マップ: パス → (イベント集合, 最後の受信時刻, EntryKind)
     // EntryKind は notify サブタイプから推定したもの。確実な (Some) 値が来たら上書き。
     let mut pending: HashMap<PathBuf, (HashSet<Event>, Instant, Option<EntryKind>)> = HashMap::new();
-    let mut interval = tokio::time::interval(Duration::from_millis(100));
+    let mut interval = tokio::time::interval(timing.poll);
 
     loop {
         tokio::select! {
@@ -369,7 +436,7 @@ pub async fn run_router(
             _ = interval.tick() => {
                 let now = Instant::now();
                 let ready: Vec<(PathBuf, HashSet<Event>, Option<EntryKind>)> = pending.iter()
-                    .filter(|(_, (_, last, _))| now.duration_since(*last) >= Duration::from_millis(500))
+                    .filter(|(_, (_, last, _))| now.duration_since(*last) >= timing.quiet)
                     .map(|(path, (events, _, kind))| (path.clone(), events.clone(), *kind))
                     .collect();
 
