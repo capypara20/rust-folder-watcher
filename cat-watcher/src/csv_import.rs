@@ -25,18 +25,69 @@ const COL_PROGRAM: usize = 17;
 const COL_ARGS: usize = 18;
 const COL_WORKING_DIR: usize = 19;
 const COL_MESSAGE: usize = 20;
-// 列21以降は後から追加されたフィルター列（既存CSVとの後方互換のため末尾に追加）
+// 列21以降は後から追加された列（既存CSVとの後方互換のため必ず末尾に追加する）
 const COL_EXCLUDE_REGEX: usize = 21;
 const COL_DIR_PATTERNS: usize = 22;
 const COL_DIR_REGEX: usize = 23;
 const COL_EXCLUDE_DIR_PATTERNS: usize = 24;
 const COL_EXCLUDE_DIR_REGEX: usize = 25;
+const COL_AUTO_CREATE: usize = 26;
+const COL_DELAY_MS: usize = 27;
+
+/// CSV の列順（先頭から）。テンプレートのヘッダー行・README・ヘルプはこれに合わせる。
+/// 列を増やすときは**必ず末尾に追加**すること（既存 CSV を壊さないため）。
+pub const COLUMNS: &[&str] = &[
+    "rule_name",
+    "enabled",
+    "watch_path",
+    "recursive",
+    "target",
+    "include_hidden",
+    "patterns",
+    "regex",
+    "exclude_patterns",
+    "events",
+    "action_type",
+    "destination",
+    "overwrite",
+    "preserve_structure",
+    "verify_integrity",
+    "shell",
+    "command",
+    "program",
+    "args",
+    "working_dir",
+    "message",
+    "exclude_regex",
+    "dir_patterns",
+    "dir_regex",
+    "exclude_dir_patterns",
+    "exclude_dir_regex",
+    "auto_create",
+    "delay_ms",
+];
 
 pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
     let content = std::fs::read_to_string(csv_path)
         .map_err(|e| AppError::Config(format!("CSV ファイルの読み込みに失敗: {e}")))?;
 
-    let rows = parse_csv(&content);
+    let toml = convert(&content)?;
+
+    if let Some(out_path) = output {
+        std::fs::write(out_path, &toml)
+            .map_err(|e| AppError::Config(format!("出力ファイルの書き込みに失敗: {e}")))?;
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        println!("[{ts}] [INFO]    変換完了: {}", out_path.display());
+    } else {
+        print!("{toml}");
+    }
+
+    Ok(())
+}
+
+/// CSV の中身を rules.toml の文字列に変換する（ファイル入出力を含まない本体）。
+pub fn convert(content: &str) -> Result<String, AppError> {
+    let rows = parse_csv(content);
     if rows.is_empty() {
         return Err(AppError::Config("CSV が空です".to_string()));
     }
@@ -76,15 +127,13 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
         let rows = &rule_map[rule_name];
         let first = &rows[0];
 
-        let enabled = get(first, COL_ENABLED);
-        let enabled = if enabled.is_empty() { "true" } else { &enabled };
+        let enabled = bool_field(&get(first, COL_ENABLED), true, rule_name, "enabled")?;
         let watch_path = get(first, COL_WATCH_PATH);
-        let recursive = get(first, COL_RECURSIVE);
-        let recursive = if recursive.is_empty() { "false" } else { &recursive };
+        let recursive = bool_field(&get(first, COL_RECURSIVE), false, rule_name, "recursive")?;
         let target = get(first, COL_TARGET);
-        let target = if target.is_empty() { "file" } else { &target };
-        let include_hidden = get(first, COL_INCLUDE_HIDDEN);
-        let include_hidden = if include_hidden.is_empty() { "false" } else { &include_hidden };
+        let target = if target.is_empty() { "file".to_string() } else { target };
+        let include_hidden =
+            bool_field(&get(first, COL_INCLUDE_HIDDEN), false, rule_name, "include_hidden")?;
         let patterns = get(first, COL_PATTERNS);
         let regex = get(first, COL_REGEX);
         let exclude_patterns = get(first, COL_EXCLUDE_PATTERNS);
@@ -133,49 +182,48 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
 
         toml.push_str("[[rules]]\n");
         toml.push_str(&format!("enabled = {enabled}\n"));
-        toml.push_str(&format!("name    = \"{rule_name}\"\n"));
+        toml.push_str(&format!("name    = {}\n", toml_str(rule_name)));
         toml.push('\n');
         toml.push_str("[rules.watch]\n");
-        toml.push_str(&format!("path             = \"{}\"\n", escape_toml_str(&watch_path)));
+        toml.push_str(&format!("path             = {}\n", toml_str(&watch_path)));
         toml.push_str(&format!("recursive        = {recursive}\n"));
-        toml.push_str(&format!("target           = \"{target}\"\n"));
+        toml.push_str(&format!("target           = {}\n", toml_str(&target)));
         toml.push_str(&format!("include_hidden   = {include_hidden}\n"));
 
         if !patterns.is_empty() {
-            let pats: Vec<String> = patterns.split('|').map(|s| format!("\"{}\"", s.trim())).collect();
-            toml.push_str(&format!("patterns         = [{}]\n", pats.join(", ")));
+            toml.push_str(&format!("patterns         = {}\n", toml_str_array(&patterns)));
         }
         if !regex.is_empty() {
-            toml.push_str(&format!("regex            = \"{}\"\n", escape_toml_str(&regex)));
+            toml.push_str(&format!("regex            = {}\n", toml_str(&regex)));
         }
 
-        let excl: Vec<String> = if exclude_patterns.is_empty() {
-            vec![]
+        let excl = if exclude_patterns.is_empty() {
+            "[]".to_string()
         } else {
-            exclude_patterns.split('|').map(|s| format!("\"{}\"", s.trim())).collect()
+            toml_str_array(&exclude_patterns)
         };
-        toml.push_str(&format!("exclude_patterns = [{}]\n", excl.join(", ")));
+        toml.push_str(&format!("exclude_patterns = {excl}\n"));
 
         if !exclude_regex.is_empty() {
-            toml.push_str(&format!("exclude_regex    = \"{}\"\n", escape_toml_str(&exclude_regex)));
+            toml.push_str(&format!("exclude_regex    = {}\n", toml_str(&exclude_regex)));
         }
         if !dir_patterns.is_empty() {
-            let pats: Vec<String> = dir_patterns.split('|').map(|s| format!("\"{}\"", escape_toml_str(s.trim()))).collect();
-            toml.push_str(&format!("dir_patterns     = [{}]\n", pats.join(", ")));
+            toml.push_str(&format!("dir_patterns     = {}\n", toml_str_array(&dir_patterns)));
         }
         if !dir_regex.is_empty() {
-            toml.push_str(&format!("dir_regex        = \"{}\"\n", escape_toml_str(&dir_regex)));
+            toml.push_str(&format!("dir_regex        = {}\n", toml_str(&dir_regex)));
         }
         if !exclude_dir_patterns.is_empty() {
-            let pats: Vec<String> = exclude_dir_patterns.split('|').map(|s| format!("\"{}\"", escape_toml_str(s.trim()))).collect();
-            toml.push_str(&format!("exclude_dir_patterns = [{}]\n", pats.join(", ")));
+            toml.push_str(&format!(
+                "exclude_dir_patterns = {}\n",
+                toml_str_array(&exclude_dir_patterns)
+            ));
         }
         if !exclude_dir_regex.is_empty() {
-            toml.push_str(&format!("exclude_dir_regex = \"{}\"\n", escape_toml_str(&exclude_dir_regex)));
+            toml.push_str(&format!("exclude_dir_regex = {}\n", toml_str(&exclude_dir_regex)));
         }
 
-        let evts: Vec<String> = events.split('|').map(|s| format!("\"{}\"", s.trim())).collect();
-        toml.push_str(&format!("events           = [{}]\n", evts.join(", ")));
+        toml.push_str(&format!("events           = {}\n", toml_str_array(&events)));
         toml.push('\n');
 
         for row in rows {
@@ -187,46 +235,60 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
             }
 
             toml.push_str("[[rules.actions]]\n");
-            toml.push_str(&format!("type = \"{action_type}\"\n"));
+            toml.push_str(&format!("type = {}\n", toml_str(&action_type)));
 
-            match action_type.as_str() {
+            match action_type.to_lowercase().as_str() {
                 "copy" | "move" => {
                     let dest = get(row, COL_DESTINATION);
-                    let overwrite = get(row, COL_OVERWRITE);
-                    let overwrite = if overwrite.is_empty() { "false" } else { &overwrite };
-                    let preserve = get(row, COL_PRESERVE_STRUCTURE);
-                    let preserve = if preserve.is_empty() { "false" } else { &preserve };
-                    let verify = get(row, COL_VERIFY_INTEGRITY);
-                    let verify = if verify.is_empty() { "false" } else { &verify };
-                    toml.push_str(&format!("destination        = \"{}\"\n", escape_toml_str(&dest)));
+                    let overwrite =
+                        bool_field(&get(row, COL_OVERWRITE), false, rule_name, "overwrite")?;
+                    let preserve = bool_field(
+                        &get(row, COL_PRESERVE_STRUCTURE),
+                        false,
+                        rule_name,
+                        "preserve_structure",
+                    )?;
+                    let verify = bool_field(
+                        &get(row, COL_VERIFY_INTEGRITY),
+                        false,
+                        rule_name,
+                        "verify_integrity",
+                    )?;
+                    toml.push_str(&format!("destination        = {}\n", toml_str(&dest)));
                     toml.push_str(&format!("overwrite          = {overwrite}\n"));
                     toml.push_str(&format!("preserve_structure = {preserve}\n"));
                     toml.push_str(&format!("verify_integrity   = {verify}\n"));
+                    // 空欄なら global.toml の [destination] auto_create に従う
+                    let auto_create = get(row, COL_AUTO_CREATE);
+                    if !auto_create.trim().is_empty() {
+                        let v = bool_field(&auto_create, true, rule_name, "auto_create")?;
+                        toml.push_str(&format!("auto_create        = {v}\n"));
+                    }
                 }
                 "command" => {
                     let shell = get(row, COL_SHELL);
                     let command = get(row, COL_COMMAND);
                     let working_dir = get(row, COL_WORKING_DIR);
-                    toml.push_str(&format!("shell       = \"{shell}\"\n"));
-                    toml.push_str(&format!("command     = \"{}\"\n", escape_toml_str(&command)));
-                    toml.push_str(&format!("working_dir = \"{}\"\n", escape_toml_str(&working_dir)));
+                    toml.push_str(&format!("shell       = {}\n", toml_str(&shell)));
+                    toml.push_str(&format!("command     = {}\n", toml_str(&command)));
+                    toml.push_str(&format!("working_dir = {}\n", toml_str(&working_dir)));
                 }
                 "execute" => {
                     let program = get(row, COL_PROGRAM);
                     let args = get(row, COL_ARGS);
                     let working_dir = get(row, COL_WORKING_DIR);
-                    toml.push_str(&format!("program     = \"{}\"\n", escape_toml_str(&program)));
-                    if args.is_empty() {
-                        toml.push_str("args        = []\n");
+                    toml.push_str(&format!("program     = {}\n", toml_str(&program)));
+                    let args_toml = if args.is_empty() {
+                        "[]".to_string()
                     } else {
-                        let arg_list: Vec<String> = args.split('|').map(|s| format!("\"{}\"", s.trim())).collect();
-                        toml.push_str(&format!("args        = [{}]\n", arg_list.join(", ")));
-                    }
-                    toml.push_str(&format!("working_dir = \"{}\"\n", escape_toml_str(&working_dir)));
+                        toml_str_array(&args)
+                    };
+                    toml.push_str(&format!("args        = {args_toml}\n"));
+                    toml.push_str(&format!("working_dir = {}\n", toml_str(&working_dir)));
                 }
                 "log" => {
                     let message = get(row, COL_MESSAGE);
-                    toml.push_str(&format!("message = \"{}\"\n", escape_toml_str(&message)));
+                    toml.push_str(&format!("message = {}\n", toml_str(&message)));
                 }
                 other => {
                     return Err(AppError::Config(format!(
@@ -234,28 +296,71 @@ pub fn run(csv_path: &Path, output: Option<&Path>) -> Result<(), AppError> {
                     )));
                 }
             }
+
+            // アクション共通: 実行前の待ち時間（空欄なら出力しない = 0）
+            if let Some(delay) = u64_field(&get(row, COL_DELAY_MS), rule_name, "delay_ms")? {
+                toml.push_str(&format!("delay_ms = {delay}\n"));
+            }
             toml.push('\n');
         }
     }
 
-    if let Some(out_path) = output {
-        std::fs::write(out_path, &toml)
-            .map_err(|e| AppError::Config(format!("出力ファイルの書き込みに失敗: {e}")))?;
-        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
-        println!("[{ts}] [INFO]    変換完了: {}", out_path.display());
-    } else {
-        print!("{toml}");
-    }
-
-    Ok(())
+    Ok(toml)
 }
 
 fn get(row: &[String], col: usize) -> String {
     row.get(col).cloned().unwrap_or_default()
 }
 
-fn escape_toml_str(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"")
+/// TOML の基本文字列（`"..."`）として安全な形に整える。
+///
+/// Windows パス（`C:\tool\app.exe`）をそのまま埋め込むと `\t` が
+/// タブのエスケープと解釈されて壊れた TOML になるため、必ずここを通す。
+fn toml_str(s: &str) -> String {
+    let escaped = s
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\t', "\\t")
+        .replace('\r', "\\r")
+        .replace('\n', "\\n");
+    format!("\"{escaped}\"")
+}
+
+/// `|` 区切りのセルを TOML の文字列配列にする。
+fn toml_str_array(field: &str) -> String {
+    let items: Vec<String> = field.split('|').map(|s| toml_str(s.trim())).collect();
+    format!("[{}]", items.join(", "))
+}
+
+/// bool 列を TOML の `true` / `false` に正規化する。
+///
+/// Excel は論理値を `TRUE` / `FALSE`（大文字）で書き出すため、そのまま
+/// 埋め込むと TOML パースに失敗する。`1` / `0` / `yes` / `no` も受ける。
+fn bool_field(value: &str, default: bool, rule_name: &str, column: &str) -> Result<bool, AppError> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Ok(default);
+    }
+    match v.to_lowercase().as_str() {
+        "true" | "1" | "yes" | "y" | "on" => Ok(true),
+        "false" | "0" | "no" | "n" | "off" => Ok(false),
+        other => Err(AppError::Config(format!(
+            "ルール '{rule_name}' の {column} は true / false で指定してください（'{other}' は解釈できません）"
+        ))),
+    }
+}
+
+/// 数値列を読む。空なら None。
+fn u64_field(value: &str, rule_name: &str, column: &str) -> Result<Option<u64>, AppError> {
+    let v = value.trim();
+    if v.is_empty() {
+        return Ok(None);
+    }
+    v.parse::<u64>().map(Some).map_err(|_| {
+        AppError::Config(format!(
+            "ルール '{rule_name}' の {column} は 0 以上の整数で指定してください（'{v}' は解釈できません）"
+        ))
+    })
 }
 
 fn parse_csv(content: &str) -> Vec<Vec<String>> {
@@ -296,3 +401,7 @@ fn parse_csv(content: &str) -> Vec<Vec<String>> {
     }
     rows
 }
+
+#[cfg(test)]
+#[path = "tests/csv_import.rs"]
+mod tests;
