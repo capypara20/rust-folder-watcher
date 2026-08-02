@@ -10,7 +10,10 @@ mod model;
 mod types;
 mod validate;
 
-pub use loader::{load_global_config, load_rules_config};
+pub use loader::{
+	apply_global_defaults, find_config_file, load_global_config, load_rules_config,
+	resolve_config_path,
+};
 pub use model::*;
 pub use types::*;
 pub use validate::{validate_global_config, validate_rules_config};
