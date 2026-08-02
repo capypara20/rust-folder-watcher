@@ -7,9 +7,10 @@ use notify::{recommended_watcher, Event, EventKind, RecursiveMode, Watcher};
 use tokio::sync::mpsc;
 use walkdir::WalkDir;
 
-use crate::config::{RetryConfig, Rule};
+use crate::config::{GlobalConfig, Rule};
 use crate::error::AppError;
 use crate::logger::Logger;
+use crate::router::DebounceTiming;
 
 fn strip_unc_prefix(path: &PathBuf) -> String {
     let s = path.display().to_string();
@@ -27,8 +28,7 @@ fn strip_unc_prefix(path: &PathBuf) -> String {
 
 pub async fn start_watching(
     rules: &[Rule],
-    retry: &RetryConfig,
-    scan_on_start: bool,
+    global: &GlobalConfig,
     log: Arc<Logger>,
 ) -> Result<(), AppError> {
     let (tx, rx) = mpsc::channel::<notify::Result<Event>>(100);
@@ -129,14 +129,21 @@ pub async fn start_watching(
     // 監視登録「後」に起動時スキャンを開始する。先に watch を張ることで、
     // スキャン中に新規到着したファイルも取りこぼさない（既存分と二重に
     // 投入されても、router 側のデバウンスが同一パスを 1 件に束ねる）。
-    if scan_on_start {
+    if global.scan_on_start() {
         spawn_startup_scan(watch_map.clone(), scan_tx, Arc::clone(&log));
     } else {
         drop(scan_tx);
     }
 
+    let timing = DebounceTiming::from_global(global);
+    log.info(format!(
+        "検知設定  デバウンス={}ms  確認間隔={}ms",
+        global.debounce_ms(),
+        global.poll_interval_ms()
+    ));
+
     let (compiled_rules, rule_log_handles) = crate::router::compile_rules(rules)?;
-    crate::router::run_router(rx, &compiled_rules, retry, Arc::clone(&log)).await?;
+    crate::router::run_router(rx, &compiled_rules, &global.retry, timing, Arc::clone(&log)).await?;
 
     // ルール別ロガー（検知・アクション）をシャットダウン
     for rule in &compiled_rules {

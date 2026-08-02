@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Local;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use colored::Colorize;
 
 use crate::error::AppError;
@@ -76,10 +76,7 @@ enum InitType {
 
 /// ファイル監視・自動処理ツール
 #[derive(Parser)]
-#[command(
-    arg_required_else_help = true,
-    after_long_help = AFTER_LONG_HELP,
-)]
+#[command(after_long_help = AFTER_LONG_HELP)]
 struct Args {
     /// グローバル設定ファイルのパス
     #[arg(short, long, value_name = "FILE")]
@@ -110,6 +107,18 @@ fn main() {
     }
 
     let args = Args::parse();
+
+    // 引数なしで起動された場合、設定ファイルが既定の場所に無ければヘルプを出す。
+    // 逆に exe と同じフォルダに global.toml / rules.toml を置いてあれば、
+    // ダブルクリックやオプションなしのサービス登録でもそのまま監視を始められる。
+    if std::env::args_os().len() <= 1
+        && (config::find_config_file("global.toml").is_none()
+            || config::find_config_file("rules.toml").is_none())
+    {
+        let _ = Args::command().print_long_help();
+        println!();
+        std::process::exit(2);
+    }
 
     if let Some(ref csv_path) = args.from_csv {
         exit_on_err(csv_import::run(csv_path, args.output.as_deref()));
@@ -159,15 +168,15 @@ fn main() {
 }
 
 async fn run(cli: &Args) -> Result<(), AppError> {
-    let global_path = cli.global.as_ref().ok_or_else(|| {
-        AppError::Config("--global オプションが未指定です".to_string())
-    })?;
-    let rules_path = cli.rules.as_ref().ok_or_else(|| {
-        AppError::Config("--rules オプションが未指定です".to_string())
-    })?;
+    // 明示指定が無ければ、カレントディレクトリ／実行ファイル横の既定名を探す。
+    let global_path = config::resolve_config_path(cli.global.clone(), "global.toml", "--global")?;
+    let rules_path = config::resolve_config_path(cli.rules.clone(), "rules.toml", "--rules")?;
 
-    let global_config = config::load_global_config(global_path)?;
-    let rules_conf = config::load_rules_config(rules_path)?;
+    let global_config = config::load_global_config(&global_path)?;
+    let mut rules_conf = config::load_rules_config(&rules_path)?;
+    // global 側の既定値をアクションへ焼き込んでから検証する
+    // （バリデーションと実行時が同じ値を見るようにするため）。
+    config::apply_global_defaults(&global_config, &mut rules_conf);
 
     config::validate_global_config(&global_config)?;
     config::validate_rules_config(&rules_conf)?;
@@ -197,13 +206,8 @@ async fn run(cli: &Args) -> Result<(), AppError> {
     #[cfg(feature = "dashboard")]
     dashboard::start(&global_config, &rules_conf.rules, Arc::clone(&log));
 
-    let result = watcher::start_watching(
-        &rules_conf.rules,
-        &global_config.retry,
-        global_config.scan_on_start(),
-        Arc::clone(&log),
-    )
-    .await;
+    let result =
+        watcher::start_watching(&rules_conf.rules, &global_config, Arc::clone(&log)).await;
     if let Err(e) = &result {
         // 監視処理の異常終了はシステム階層のエラーとしてシステムログに残す。
         log.error(format!("監視処理が異常終了しました: {e}"));
