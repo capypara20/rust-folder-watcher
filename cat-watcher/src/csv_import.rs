@@ -36,6 +36,8 @@ const COL_DELAY_MS: usize = 27;
 
 /// CSV の列順（先頭から）。テンプレートのヘッダー行・README・ヘルプはこれに合わせる。
 /// 列を増やすときは**必ず末尾に追加**すること（既存 CSV を壊さないため）。
+// 参照するのはテンプレートとの整合テストのみ。
+#[cfg_attr(not(test), allow(dead_code))]
 pub const COLUMNS: &[&str] = &[
     "rule_name",
     "enabled",

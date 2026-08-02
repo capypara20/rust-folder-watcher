@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>cat-watcher dashboard</title>
+<link rel="stylesheet" href="/assets/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark">🐾</span>
+    <span class="name">cat-watcher</span>
+    <span class="sub">dashboard</span>
+  </div>
+
+  <div class="status" id="status">
+    <span id="dot" class="dot"></span><span id="statusText">接続中…</span>
+  </div>
+
+  <div class="spacer"></div>
+
+  <div class="stats">
+    <span class="stat"><b id="shown">0</b><span class="unit">表示</span></span>
+    <span class="sep">/</span>
+    <span class="stat"><b id="count">0</b><span class="unit">受信</span></span>
+  </div>
+</header>
+
+<div class="toolbar">
+  <div class="group" role="group" aria-label="種別フィルタ">
+    <label class="ck"><input type="checkbox" class="kind" value="system" checked><span class="chip k-system">system</span></label>
+    <label class="ck"><input type="checkbox" class="kind" value="detect" checked><span class="chip k-detect">detect</span></label>
+    <label class="ck"><input type="checkbox" class="kind" value="action" checked><span class="chip k-action">action</span></label>
+  </div>
+
+  <div class="group grow">
+    <div class="searchbox">
+      <span class="ico" aria-hidden="true">🔍</span>
+      <input type="text" id="search" autocomplete="off"
+             placeholder="検索  （Enter=次 / Shift+Enter=前 / Ctrl+Enter=過去ログ）">
+      <button id="tCase" class="tog" title="大文字小文字を区別">Aa</button>
+      <button id="tRegex" class="tog" title="正規表現として扱う">.*</button>
+    </div>
+    <button id="prev" class="icon" title="前の一致 (Shift+Enter)">◀</button>
+    <span id="matchInfo" class="matchinfo">0/0</span>
+    <button id="next" class="icon" title="次の一致 (Enter)">▶</button>
+    <label class="ck"><input type="checkbox" id="only">一致のみ</label>
+    <button id="histBtn" title="保存済みログファイルを横断検索 (Ctrl+Enter)">📁 過去ログ</button>
+  </div>
+
+  <div class="group">
+    <button id="wrap" title="長い行を折り返す">折り返し</button>
+    <button id="autoscroll" class="on">自動スクロール</button>
+    <button id="pause">一時停止</button>
+    <button id="clear">クリア</button>
+  </div>
+</div>
+
+<div id="banner" hidden></div>
+
+<div class="table" id="table">
+  <div class="thead" id="thead">
+    <div class="th c-time">時刻</div>
+    <div class="th c-kind">種別</div>
+    <div class="th c-level">レベル</div>
+    <div class="th c-rule">ルール</div>
+    <div class="th c-path">対象</div>
+    <div class="th c-body">内容</div>
+  </div>
+  <div class="tbody" id="log">
+    <div class="empty">イベント待機中…</div>
+  </div>
+</div>
+
+<script type="module" src="/assets/app.js"></script>
+</body>
+</html>

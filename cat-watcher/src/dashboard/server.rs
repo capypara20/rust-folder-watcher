@@ -6,6 +6,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::broadcast;
 
+use super::assets::{self, Asset};
 use super::event::DashEvent;
 use super::search::handle_search;
 use super::HUB;
@@ -13,9 +14,6 @@ use crate::logger::Logger;
 
 /// SSE キープアライブ間隔（秒）。切断検知も兼ねる。
 const KEEPALIVE_SECS: u64 = 15;
-
-/// 埋め込みダッシュボード（単一 HTML）。外部ファイル不要で単一 exe のまま配布できる。
-const INDEX_HTML: &str = include_str!("dashboard.html");
 
 /// HTTP/SSE サーバを起動する。`bind` は `"127.0.0.1:8080"` 形式。
 /// 失敗してもプロセスは落とさず、system ログに記録して戻る。
@@ -69,23 +67,28 @@ async fn handle_connection(stream: TcpStream) -> std::io::Result<()> {
     let mut stream = reader.into_inner();
 
     match path {
-        "/" | "/index.html" => write_html(&mut stream).await,
+        "/" | "/index.html" => write_asset(&mut stream, &assets::INDEX).await,
         "/events" => stream_events(stream).await,
         "/search" => handle_search(&mut stream, &query).await,
-        _ => write_not_found(&mut stream).await,
+        // CSS / JS などの静的アセット
+        other => match assets::find(other) {
+            Some(asset) => write_asset(&mut stream, asset).await,
+            None => write_not_found(&mut stream).await,
+        },
     }
 }
 
-/// ダッシュボード HTML を返す。
-async fn write_html(stream: &mut TcpStream) -> std::io::Result<()> {
-    let body = INDEX_HTML.as_bytes();
+/// 静的アセット（HTML / CSS / JS）を返す。
+async fn write_asset(stream: &mut TcpStream, asset: &Asset) -> std::io::Result<()> {
+    let body = asset.body.as_bytes();
     let header = format!(
         "HTTP/1.1 200 OK\r\n\
-         Content-Type: text/html; charset=utf-8\r\n\
+         Content-Type: {}\r\n\
          Content-Length: {}\r\n\
          Cache-Control: no-cache\r\n\
          Connection: close\r\n\
          \r\n",
+        asset.content_type,
         body.len()
     );
     stream.write_all(header.as_bytes()).await?;
