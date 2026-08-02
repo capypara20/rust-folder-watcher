@@ -25,6 +25,25 @@ console   = true                  # コンソールへの出力 ON/OFF
 [startup_scan]
 enabled = true
 
+# ─── コピー/移動先フォルダの自動作成 ───────────────────────────────────
+# auto_create = true  : 宛先フォルダが無ければ実行時に自動で作ります。
+#                       起動時は「ドライブや共有そのものが存在するか」だけ確認します。
+# auto_create = false : 自動作成しません。宛先が無ければ起動時にエラーにします。
+#                       （typo で意図しない場所へ書き込むのを防ぎたいとき）
+# 個別に変えたいアクションは rules.toml 側で auto_create を書けば上書きできます。
+[destination]
+auto_create = true
+
+# ─── 検知のデバウンス ─────────────────────────────────────────────────
+# エディタや同期ソフトは 1 回の保存で何度もイベントを出します。最後の
+# イベントから debounce_ms だけ静かになったら「確定」として 1 回だけ処理します。
+#   ・巨大ファイルのコピー完了を待ちたい → debounce_ms を長めに（例: 3000）
+#   ・とにかく速く反応させたい           → 短めに（例: 200）
+# poll_interval_ms は「確定したものが無いか見に行く間隔」です。1 以上必須。
+[detect]
+debounce_ms      = 500
+poll_interval_ms = 100
+
 # ─── ダッシュボード（ブラウザでログをリアルタイム表示）─────────────────
 # enabled = true でローカル HTTP サーバを起動し、ブラウザの
 #   http://127.0.0.1:8080/  で検知/アクション/システムログをライブ表示します。
@@ -54,7 +73,7 @@ name    = "ルール名"
 path             = 'C:\監視フォルダ'
 recursive        = true
 target           = "file"          # file / directory / both
-include_hidden   = false
+include_hidden   = false           # 隠しファイル/フォルダを検知対象に含めるか
 patterns         = ["*"]           # glob（regex と排他）
 # regex          = ".*\\.csv$"     # 正規表現（patterns と排他）
 exclude_patterns = []
@@ -83,12 +102,17 @@ rotation  = "daily"
 type    = "log"
 message = "検知: {BaseName}"
 
+# どのアクションにも delay_ms を書けます（実行前に待つミリ秒）。
+# 書き込みが終わりきらないうちに処理が走るのを避けたいときに使います。
+
 # [[rules.actions]]                # ─── copy ──────────────────────────────
 # type               = "copy"
 # destination        = 'D:\backup\{Date}'
 # overwrite          = false
 # preserve_structure = false
 # verify_integrity   = true
+# auto_create        = true        # 省略時は global.toml の [destination] に従う
+# delay_ms           = 0           # 実行前に待つミリ秒
 
 # [[rules.actions]]                # ─── move ──────────────────────────────
 # type               = "move"
@@ -99,7 +123,8 @@ message = "検知: {BaseName}"
 
 # [[rules.actions]]                # ─── command ────────────────────────────
 # type        = "command"
-# shell       = "cmd"              # cmd / powershell / pwsh
+# shell       = "cmd"              # Windows: cmd / powershell / pwsh
+#                                  # Linux:   bash / sh / pwsh
 # command     = "echo {FullName}"
 # working_dir = ""
 
@@ -111,6 +136,10 @@ message = "検知: {BaseName}"
 "#;
 
 pub const RULES_CSV: &str = "\
-rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,message,exclude_regex,dir_patterns,dir_regex,exclude_dir_patterns,exclude_dir_regex\r\n\
-ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,log,,,,,,,,,,検知: {BaseName},,,,,\r\n\
+rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,message,exclude_regex,dir_patterns,dir_regex,exclude_dir_patterns,exclude_dir_regex,auto_create,delay_ms\r\n\
+ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,log,,,,,,,,,,検知: {BaseName},,,,,,,\r\n\
 ";
+
+#[cfg(test)]
+#[path = "tests/templates.rs"]
+mod tests;

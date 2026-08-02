@@ -31,6 +31,10 @@ const AFTER_LONG_HELP: &str = "\
   監視の起動:
     cat-watcher -g global.toml -r rules.toml
     cat-watcher -g global.toml -r rules.toml --validate
+    cat-watcher                            # ↓ 既定名を自動で探して起動
+
+  \x1b[2m-g / -r を省略すると global.toml / rules.toml を
+   「カレントディレクトリ → 実行ファイルと同じフォルダ」の順に探します。\x1b[0m
 
   テンプレート生成（複数同時指定可）:
     cat-watcher --init global rules        # global.toml と rules.toml を同時生成
@@ -57,10 +61,12 @@ const AFTER_LONG_HELP: &str = "\
   patterns, regex, exclude_patterns, events,
   action_type, destination, overwrite, preserve_structure, verify_integrity,
   shell, command, program, args, working_dir, message,
-  exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex
+  exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex,
+  auto_create, delay_ms
 
   複数アクションのルール: rule_name を同じにして行を追加
   複数値フィールド（patterns / events / args 等）: | で区切る  例: create|modify
+  真偽値: true / false（Excel の TRUE / FALSE、1 / 0、yes / no も可）
   ※ 列22以降（exclude_regex〜）は省略可（既存 CSV との後方互換のため末尾）
 ";
 
