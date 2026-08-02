@@ -127,7 +127,12 @@ fn run_watcher(
         let (log, log_handle) = Logger::new_system(&global_config.system_log, false)?;
         let log = Arc::new(log);
 
-        log.info("Windowsサービスとして起動しました".to_string());
+        // 実行アカウントを最初に出す。ネットワーク共有が見えない／外部プロセスが
+        // SYSTEM で動く、といった相談はここを確認するのが出発点になる。
+        log.info(format!(
+            "Windowsサービスとして起動しました  実行アカウント={}",
+            crate::platform::current_account()
+        ));
 
         // サービスは既定で SYSTEM 権限で動くため、設定が有効なら外部プロセス
         // （command / execute）をアクティブなログオンユーザー権限で起動する。

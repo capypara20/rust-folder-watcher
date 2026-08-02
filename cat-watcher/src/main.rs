@@ -206,6 +206,10 @@ async fn run(cli: &Args) -> Result<(), AppError> {
         global_path.display(),
         rules_path.display()
     ));
+    // 実行アカウントを出しておく。ネットワーク共有（UNC）が見えるかどうかは
+    // このアカウントの権限で決まるため、切り分けの出発点になる。
+    #[cfg(windows)]
+    log.info(format!("実行アカウント={}", platform::current_account()));
 
     // ダッシュボード（既定で同梱・設定 enabled=true のときだけ起動）。
     // 監視を開始する前にハブを初期化し、HTTP/SSE サーバを別タスクで起動する。
