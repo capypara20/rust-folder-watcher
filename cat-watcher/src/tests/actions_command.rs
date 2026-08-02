@@ -15,12 +15,22 @@ fn make_ctx(src: &std::path::Path, watch: &std::path::Path) -> PlaceholderContex
     PlaceholderContext::new(src, watch, "")
 }
 
+// この OS で使えるシェルは全部通り、それ以外は弾かれること。
+// 使える値は VALID_SHELLS（Windows: cmd/powershell/pwsh、それ以外: bash/sh/pwsh）。
 #[test]
-fn build_shell_command_known_and_unknown_shells() {
-    assert!(build_shell_command("cmd", "echo test").is_ok());
-    assert!(build_shell_command("powershell", "Get-Date").is_ok());
-    assert!(build_shell_command("pwsh", "Get-Date").is_ok());
+fn build_shell_command_accepts_valid_shells_only() {
+    for shell in VALID_SHELLS {
+        assert!(build_shell_command(shell, "echo test").is_ok(), "shell={shell}");
+        // 他の設定値と同じく大文字小文字は区別しない
+        assert!(
+            build_shell_command(&shell.to_uppercase(), "echo test").is_ok(),
+            "shell={shell}（大文字）"
+        );
+    }
     assert!(build_shell_command("zsh", "echo hi").is_err());
+    // 他 OS 用のシェル名も、この OS で起動できないなら弾く
+    let foreign = if cfg!(windows) { "bash" } else { "cmd" };
+    assert!(build_shell_command(foreign, "echo hi").is_err(), "shell={foreign}");
 }
 
 #[tokio::test]
