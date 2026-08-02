@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::config::{ActionConfig, ActionType, RetryConfig};
 use crate::error::AppError;
 use crate::logger::Logger;
-use crate::placeholder::{expand_placeholders, PlaceholderContext};
+use crate::placeholder::PlaceholderContext;
 
 /// アクション結果（開始・成功・失敗・警告・補足）を
 /// system ロガー（ターミナル表示用）と action ロガー（ファイル記録用）の
@@ -126,17 +126,6 @@ pub async fn execute_chain(
                 let detail = format!("{program} {args_str}").trim_end().to_string();
                 sink.action_start(index, total, "execute", detail);
                 execute::execute(action, &ctx, &sink, step).await.map(|_| None)
-            }
-            ActionType::Log => {
-                let raw = action.message.as_deref().unwrap_or("");
-                sink.action_start(index, total, "log", String::new());
-                match expand_placeholders(raw, &ctx) {
-                    Ok(msg) => {
-                        sink.ok(index, total, msg);
-                        Ok(None)
-                    }
-                    Err(e) => Err(e),
-                }
             }
         };
 

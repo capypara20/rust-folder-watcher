@@ -60,14 +60,14 @@ const AFTER_LONG_HELP: &str = "\
   rule_name, enabled, watch_path, recursive, target, include_hidden,
   patterns, regex, exclude_patterns, events,
   action_type, destination, overwrite, preserve_structure, verify_integrity,
-  shell, command, program, args, working_dir, message,
+  shell, command, program, args, working_dir,
   exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex,
   auto_create, delay_ms
 
   複数アクションのルール: rule_name を同じにして行を追加
   複数値フィールド（patterns / events / args 等）: | で区切る  例: create|modify
   真偽値: true / false（Excel の TRUE / FALSE、1 / 0、yes / no も可）
-  ※ 列22以降（exclude_regex〜）は省略可（既存 CSV との後方互換のため末尾）
+  ※ 列21以降（exclude_regex〜）は省略可（既存 CSV との後方互換のため末尾）
 ";
 
 #[derive(clap::ValueEnum, Clone)]

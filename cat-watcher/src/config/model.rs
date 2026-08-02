@@ -283,9 +283,6 @@ pub struct ActionConfig {
     pub program: Option<String>,
     pub args: Option<Vec<String>>,
 
-    // typeがLogのとき
-    pub message: Option<String>,
-
     /// このアクションを実行する前に待つ時間（ミリ秒）。省略時は 0（待たない）。
     ///
     /// デバウンスだけでは足りないケース向けの逃げ道。たとえば

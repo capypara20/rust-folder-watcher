@@ -24,15 +24,14 @@ const COL_COMMAND: usize = 16;
 const COL_PROGRAM: usize = 17;
 const COL_ARGS: usize = 18;
 const COL_WORKING_DIR: usize = 19;
-const COL_MESSAGE: usize = 20;
-// 列21以降は後から追加された列（既存CSVとの後方互換のため必ず末尾に追加する）
-const COL_EXCLUDE_REGEX: usize = 21;
-const COL_DIR_PATTERNS: usize = 22;
-const COL_DIR_REGEX: usize = 23;
-const COL_EXCLUDE_DIR_PATTERNS: usize = 24;
-const COL_EXCLUDE_DIR_REGEX: usize = 25;
-const COL_AUTO_CREATE: usize = 26;
-const COL_DELAY_MS: usize = 27;
+// 列20以降は後から追加された列（既存CSVとの後方互換のため必ず末尾に追加する）
+const COL_EXCLUDE_REGEX: usize = 20;
+const COL_DIR_PATTERNS: usize = 21;
+const COL_DIR_REGEX: usize = 22;
+const COL_EXCLUDE_DIR_PATTERNS: usize = 23;
+const COL_EXCLUDE_DIR_REGEX: usize = 24;
+const COL_AUTO_CREATE: usize = 25;
+const COL_DELAY_MS: usize = 26;
 
 /// CSV の列順（先頭から）。テンプレートのヘッダー行・README・ヘルプはこれに合わせる。
 /// 列を増やすときは**必ず末尾に追加**すること（既存 CSV を壊さないため）。
@@ -59,7 +58,6 @@ pub const COLUMNS: &[&str] = &[
     "program",
     "args",
     "working_dir",
-    "message",
     "exclude_regex",
     "dir_patterns",
     "dir_regex",
@@ -96,6 +94,9 @@ pub fn convert(content: &str) -> Result<String, AppError> {
 
     // ヘッダー行スキップ（1行目がヘッダーの場合）
     let data_start = if rows[0].first().map(|s| s.as_str()) == Some("rule_name") {
+        // 列の並びが違うまま読み進めると、別物のルールを静かに作ってしまう。
+        // ヘッダーがあるなら必ず突き合わせる。
+        check_header(&rows[0])?;
         1
     } else {
         0
@@ -289,12 +290,14 @@ pub fn convert(content: &str) -> Result<String, AppError> {
                     toml.push_str(&format!("working_dir = {}\n", toml_str(&working_dir)));
                 }
                 "log" => {
-                    let message = get(row, COL_MESSAGE);
-                    toml.push_str(&format!("message = {}\n", toml_str(&message)));
+                    return Err(AppError::Config(format!(
+                        "ルール '{rule_name}' の log アクションは v2.0 で廃止されました。\n\
+                         検知内容もアクションの結果も自動でログに記録されるため、行を削除してください"
+                    )));
                 }
                 other => {
                     return Err(AppError::Config(format!(
-                        "ルール '{rule_name}' の action_type '{other}' は不明です (copy / move / command / execute / log)"
+                        "ルール '{rule_name}' の action_type '{other}' は不明です (copy / move / command / execute)"
                     )));
                 }
             }
@@ -308,6 +311,36 @@ pub fn convert(content: &str) -> Result<String, AppError> {
     }
 
     Ok(toml)
+}
+
+/// ヘッダー行が [`COLUMNS`] と一致するか確かめる。
+///
+/// 途中で切れているぶんには許す（末尾の列は後から足したもので、
+/// 古い CSV には無いため）。並びが違う場合は、どの位置で食い違ったかを
+/// 添えてエラーにする。
+fn check_header(header: &[String]) -> Result<(), AppError> {
+    if header.len() > COLUMNS.len() {
+        return Err(AppError::Config(format!(
+            "CSV の列数が多すぎます（{} 列。想定は最大 {} 列）。列の並びは次のとおりです:\n  {}",
+            header.len(),
+            COLUMNS.len(),
+            COLUMNS.join(", ")
+        )));
+    }
+    for (i, name) in header.iter().enumerate() {
+        if !name.eq_ignore_ascii_case(COLUMNS[i]) {
+            return Err(AppError::Config(format!(
+                "CSV の {} 列目が '{}' になっていますが '{}' である必要があります。\n\
+                 ※ v2.0 で message 列（log アクション）を廃止し、以降の列が 1 つ前へ詰まりました。\n\
+                 列の並びは次のとおりです:\n  {}",
+                i + 1,
+                name,
+                COLUMNS[i],
+                COLUMNS.join(", ")
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn get(row: &[String], col: usize) -> String {

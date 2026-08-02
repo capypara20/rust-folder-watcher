@@ -98,21 +98,20 @@ rotation  = "daily"
 
 # ─── アクション例（使うものだけコメント解除してください） ────────────────
 
-[[rules.actions]]                  # ─── log（ログ出力のみ） ─────────────
-type    = "log"
-message = "検知: {BaseName}"
-
 # どのアクションにも delay_ms を書けます（実行前に待つミリ秒）。
 # 書き込みが終わりきらないうちに処理が走るのを避けたいときに使います。
+#
+# ※ 検知した内容もアクションの結果も自動でログに残ります。
+#    そのためだけのアクションを書く必要はありません。
 
-# [[rules.actions]]                # ─── copy ──────────────────────────────
-# type               = "copy"
-# destination        = 'D:\backup\{Date}'
-# overwrite          = false
-# preserve_structure = false
-# verify_integrity   = true
-# auto_create        = true        # 省略時は global.toml の [destination] に従う
-# delay_ms           = 0           # 実行前に待つミリ秒
+[[rules.actions]]                  # ─── copy ──────────────────────────────
+type               = "copy"
+destination        = 'D:\backup\{Date}'
+overwrite          = false
+preserve_structure = false
+verify_integrity   = true
+# auto_create      = true          # 省略時は global.toml の [destination] に従う
+# delay_ms         = 0             # 実行前に待つミリ秒
 
 # [[rules.actions]]                # ─── move ──────────────────────────────
 # type               = "move"
@@ -136,8 +135,8 @@ message = "検知: {BaseName}"
 "#;
 
 pub const RULES_CSV: &str = "\
-rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,message,exclude_regex,dir_patterns,dir_regex,exclude_dir_patterns,exclude_dir_regex,auto_create,delay_ms\r\n\
-ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,log,,,,,,,,,,検知: {BaseName},,,,,,,\r\n\
+rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,exclude_regex,dir_patterns,dir_regex,exclude_dir_patterns,exclude_dir_regex,auto_create,delay_ms\r\n\
+ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,copy,D:\\backup\\{Date},false,true,true,,,,,,,,,,,,\r\n\
 ";
 
 #[cfg(test)]

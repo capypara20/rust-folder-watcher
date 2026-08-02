@@ -217,10 +217,8 @@ file_name = "action_csv-backup_{Date}.log"
 rotation  = "daily"
 
 # ──────────── アクションチェーン ────────────
-[[rules.actions]]
-type    = "log"
-message = "検知: {BaseName}"
-
+# 検知内容もアクションの結果も自動でログに残るため、
+# 記録目的だけのアクションを書く必要はありません。
 [[rules.actions]]
 type               = "copy"
 destination        = "D:\\backup\\{Date}"
@@ -590,15 +588,15 @@ systemctl status cat-watcher
 CSV の列順（1 行目はヘッダー、自動でスキップ）：
 
 ```
- 1 rule_name             10 events                 19 args                   28 delay_ms
+ 1 rule_name             10 events                 19 args
  2 enabled               11 action_type            20 working_dir
- 3 watch_path            12 destination            21 message
- 4 recursive             13 overwrite              22 exclude_regex
- 5 target                14 preserve_structure     23 dir_patterns
- 6 include_hidden        15 verify_integrity       24 dir_regex
- 7 patterns              16 shell                  25 exclude_dir_patterns
- 8 regex                 17 command                26 exclude_dir_regex
- 9 exclude_patterns      18 program                27 auto_create
+ 3 watch_path            12 destination            21 exclude_regex
+ 4 recursive             13 overwrite              22 dir_patterns
+ 5 target                14 preserve_structure     23 dir_regex
+ 6 include_hidden        15 verify_integrity       24 exclude_dir_patterns
+ 7 patterns              16 shell                  25 exclude_dir_regex
+ 8 regex                 17 command                26 auto_create
+ 9 exclude_patterns      18 program                27 delay_ms
 ```
 
 1 行に並べると次のとおりです。
@@ -607,7 +605,7 @@ CSV の列順（1 行目はヘッダー、自動でスキップ）：
 rule_name, enabled, watch_path, recursive, target, include_hidden,
 patterns, regex, exclude_patterns, events,
 action_type, destination, overwrite, preserve_structure, verify_integrity,
-shell, command, program, args, working_dir, message,
+shell, command, program, args, working_dir,
 exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex,
 auto_create, delay_ms
 ```
@@ -615,8 +613,10 @@ auto_create, delay_ms
 - 同じ `rule_name` の行を複数並べると、1 ルールに複数アクションを定義できます
 - 配列フィールド（`patterns` / `events` / `args` 等）は `|` 区切り（例: `create|modify`）
 - 真偽値は `true` / `false`。Excel が書き出す `TRUE` / `FALSE`、`1` / `0`、`yes` / `no` も受け付けます
-- `log` アクションは `action_type = "log"` とし、`message` 列にメッセージを記入します
-- 列 22 以降（`exclude_regex` 〜）は省略できます。古い CSV との後方互換のため、
+- `action_type` は `copy` / `move` / `command` / `execute` のいずれかです
+- ヘッダー行がある場合、列の並びが上の定義と一致するか起動時に検証されます
+  （ズレたまま読み込んで別物のルールを作らないようにするため）
+- 列 21 以降（`exclude_regex` 〜）は省略できます。古い CSV との後方互換のため、
   **新しい列は必ず末尾に追加**されます
 - Windows パス（`C:\tool\app.exe`）や引用符を含む値もそのまま書けます
 

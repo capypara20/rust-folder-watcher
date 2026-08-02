@@ -368,11 +368,6 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 			}
 		}
 
-		ActionType::Log => {
-			if action.message.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Log のとき、message(出力するメッセージ) を定義してください", rule_name));
-			}
-		}
 	}
 }
 
@@ -382,7 +377,6 @@ fn collect_action_placeholder_errors(action: &ActionConfig, rule_name: &str, err
 		("action.command", &action.command),
 		("action.working_dir", &action.working_dir),
 		("action.program", &action.program),
-		("action.message", &action.message),
 	];
 	for (field_name, field_value) in fields {
 		if let Some(value) = field_value {
