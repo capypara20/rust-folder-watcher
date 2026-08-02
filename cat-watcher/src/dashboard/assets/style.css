@@ -119,6 +119,7 @@ button {
 }
 button:hover { border-color: var(--accent); }
 button.on { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: .4; cursor: default; border-color: var(--border); color: var(--muted); }
 button.icon { padding: 5px 9px; }
 button.tog { padding: 2px 6px; font-size: 11px; border-color: transparent; color: var(--muted); }
 button.tog:hover { color: var(--fg); }
@@ -186,6 +187,46 @@ button.tog.on { color: var(--accent); border-color: var(--accent); }
   border-bottom: 1px solid var(--border);
   color: var(--muted); font-size: 11px; letter-spacing: .5px;
 }
+
+/* ---- 4b. 検知グループ（detect をクリックで開閉）------------ */
+/* 検知 1 件 = 1 グループ。畳んでおくと「マッチしたファイルの一覧」になり、
+   開くとその検知に紐づく action 行が出る。 */
+.grp { border-bottom: 1px solid var(--border-soft); }
+.grp .grp-head { cursor: pointer; border-bottom: 0; user-select: none; }
+.grp .grp-head:hover { background: rgba(74, 163, 255, .10); }
+.grp.open > .grp-head { background: rgba(74, 163, 255, .07); }
+
+/* 開閉の三角。時刻列の内側に置くので、列の幅は変えない */
+.twisty {
+  position: absolute; left: 3px;
+  color: var(--muted); font-size: 9px; line-height: 1.9;
+}
+.grp .grp-head { position: relative; }
+.grp .grp-head:hover .twisty { color: var(--accent); }
+
+/* 見出しの集計。畳んだままでも失敗の有無が分かるよう「内容」列の右端に寄せる */
+.grp .grp-head .c-body { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+.grp-summary {
+  display: flex; gap: 8px; align-items: baseline;
+  margin-left: auto; flex: none; white-space: nowrap;
+}
+.grp-count { color: var(--muted); font-size: 11px; }
+.grp-none  { color: var(--muted); font-size: 11px; opacity: .7; }
+.grp-tally { font-size: 11px; font-weight: 600; }
+
+.grp-children { display: none; }
+.grp.open > .grp-children { display: block; }
+.grp-children .row {
+  background: rgba(0, 0, 0, .22);
+  border-left-color: rgba(74, 163, 255, .35);
+  padding-left: calc(var(--row-pad-x) + 13px);
+}
+.grp-children .row:hover { background: rgba(255, 255, 255, .05); }
+/* グループ内では detect 行の緑線を引き継がない */
+.grp-children .row.detect { border-left-color: rgba(74, 163, 255, .35); }
+
+/* 失敗を含むグループは畳んでいても目立たせる */
+.grp.has-error > .grp-head { border-left-color: var(--error); }
 
 /* 既定は 1 行に収める。「折り返し」ボタンで解除する */
 .c-rule, .c-path, .c-body { overflow: hidden; }

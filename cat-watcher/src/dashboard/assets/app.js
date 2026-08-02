@@ -4,8 +4,17 @@
 //   render.js … 1 イベント → 表の 1 行
 //   app.js    … それらを繋いで画面を組み立てる（このファイル）
 
-import { search, haystack, highlightInto } from "./search.js";
-import { buildRow, buildHistoryRow, buildDaySeparator, splitTimestamp, el } from "./render.js";
+import { search, haystack } from "./search.js";
+import {
+  buildRow,
+  buildHistoryRow,
+  buildDaySeparator,
+  buildGroupBlock,
+  setGroupOpen,
+  updateGroupSummary,
+  splitTimestamp,
+  el,
+} from "./render.js";
 
 const MAX_EVENTS = 5000; // メモリに保持する最大イベント数
 const MAX_DOM = 2000;    // DOM に残す最大行数（描画負荷対策）
@@ -35,10 +44,14 @@ const state = {
   paused: false,
   pendingWhilePaused: 0,
   wrap: false,
+  grouping: true,      // 検知ごとに action をまとめて折りたたむ
+  expandAll: false,
   currentMatch: -1,    // ナビゲーション中の <mark> インデックス
   flashArmed: false,   // 接続直後のバックログ再生では光らせない
   lastDate: null,      // 直近に描いた日付（区切り行の挿入判定用）
   shownCount: 0,
+  /** 追記中のグループ。detect が来るたび差し替わる。 */
+  group: null,
 };
 
 /* ---- 表示判定 ------------------------------------------- */
@@ -55,6 +68,21 @@ function shouldShow(ev, kinds) {
   if (!kinds[ev.kind]) return false;
   if (ui.only.checked && search.active && !search.test(haystack(ev))) return false;
   return true;
+}
+
+/** 検知（detect の match）はグループの見出しになる。 */
+function isGroupHead(ev) {
+  return ev.kind === "detect" && ev.level === "match";
+}
+
+/**
+ * グループにまとめる対象か。
+ *
+ * `block`（「アクション N 件を実行」の区切り行）は見出しの集計と内容が
+ * 重複するので、グループ表示のときは描かない。
+ */
+function belongsToGroup(ev) {
+  return ev.kind === "action" && ev.level !== "block";
 }
 
 /* ---- ライブ表示 ------------------------------------------ */
@@ -74,6 +102,7 @@ function showEmpty(message) {
   emptyShown = true;
   state.lastDate = null;
   state.shownCount = 0;
+  state.group = null;
   updateCounters();
 }
 
@@ -85,6 +114,63 @@ function appendDaySeparatorIfNeeded(parent, ev) {
   parent.appendChild(buildDaySeparator(date));
 }
 
+/**
+ * 1 イベントを `parent` へ描く。グループ表示のときは detect を見出しにして、
+ * 続く action 行をその子として畳み込む。
+ *
+ * `state.group` が「いま追記中のグループ」。detect が来たら差し替え、
+ * system 行が来たら解除する（system は検知に紐づかないため）。
+ */
+function renderEvent(parent, ev, isNew) {
+  appendDaySeparatorIfNeeded(parent, ev);
+
+  if (!state.grouping) {
+    state.group = null;
+    const row = buildRow(ev);
+    if (isNew && state.flashArmed && ev.kind === "detect") row.classList.add("flash");
+    parent.appendChild(row);
+    state.shownCount++;
+    return;
+  }
+
+  if (isGroupHead(ev)) {
+    const g = buildGroupBlock(ev);
+    g.counts = { total: 0, ok: 0, warn: 0, error: 0 };
+    updateGroupSummary(g.summary, g.counts);
+    setGroupOpen(g.block, state.expandAll);
+    if (isNew && state.flashArmed) g.head.classList.add("flash");
+    parent.appendChild(g.block);
+    state.group = g;
+    state.shownCount++;
+    return;
+  }
+
+  if (state.group && belongsToGroup(ev)) {
+    state.group.children.appendChild(buildRow(ev));
+    const c = state.group.counts;
+    c.total++;
+    if (ev.level === "ok") c.ok++;
+    else if (ev.level === "warn") c.warn++;
+    else if (ev.level === "error") c.error++;
+    updateGroupSummary(state.group.summary, c);
+    // 失敗を含むグループは畳んでいても分かるようにし、自動で開く
+    if (c.error > 0) {
+      state.group.block.classList.add("has-error");
+      setGroupOpen(state.group.block, true);
+    }
+    state.shownCount++;
+    return;
+  }
+
+  // block 行はグループ見出しの集計と重複するので描かない
+  if (ev.kind === "action" && ev.level === "block") return;
+
+  // 検知に紐づかない行（system など）はグループを抜けて素で並べる
+  state.group = null;
+  parent.appendChild(buildRow(ev));
+  state.shownCount++;
+}
+
 function appendLive(ev, isNew) {
   if (state.mode !== "live") return;
   if (!shouldShow(ev, checkedKinds())) return;
@@ -92,11 +178,7 @@ function appendLive(ev, isNew) {
   clearEmpty();
   const nearBottom = ui.log.scrollHeight - ui.log.scrollTop - ui.log.clientHeight < 40;
 
-  appendDaySeparatorIfNeeded(ui.log, ev);
-  const row = buildRow(ev);
-  if (isNew && state.flashArmed && ev.kind === "detect") row.classList.add("flash");
-  ui.log.appendChild(row);
-  state.shownCount++;
+  renderEvent(ui.log, ev, isNew);
 
   while (ui.log.childNodes.length > MAX_DOM) ui.log.removeChild(ui.log.firstChild);
   if (state.autoscroll && nearBottom) ui.log.scrollTop = ui.log.scrollHeight;
@@ -116,26 +198,39 @@ function rerenderLive() {
   emptyShown = false;
   state.lastDate = null;
   state.shownCount = 0;
+  state.group = null;
 
   const kinds = checkedKinds();
   const frag = document.createDocumentFragment();
   for (const ev of state.events.slice(-MAX_DOM)) {
     if (!shouldShow(ev, kinds)) continue;
-    appendDaySeparatorIfNeeded(frag, ev);
-    frag.appendChild(buildRow(ev));
-    state.shownCount++;
+    renderEvent(frag, ev, false);
   }
 
   if (state.shownCount === 0) {
     showEmpty("表示できるイベントがありません");
   } else {
     ui.log.appendChild(frag);
+    // 検索中は、一致が畳まれたままにならないようそのグループを開く
+    if (search.active) openGroupsWithMatches();
     if (state.autoscroll) ui.log.scrollTop = ui.log.scrollHeight;
   }
 
   state.currentMatch = -1;
   updateCounters();
   updateMatchInfo();
+}
+
+/** 子要素に検索一致があるグループを開く。 */
+function openGroupsWithMatches() {
+  ui.log.querySelectorAll(".grp").forEach((block) => {
+    if (block.querySelector(".grp-children mark")) setGroupOpen(block, true);
+  });
+}
+
+/** すべてのグループを開く／畳む。 */
+function setAllGroupsOpen(open) {
+  ui.log.querySelectorAll(".grp").forEach((block) => setGroupOpen(block, open));
 }
 
 function onEvent(ev) {
@@ -178,6 +273,9 @@ function gotoMatch(delta) {
   state.currentMatch = (state.currentMatch + delta + ms.length) % ms.length;
   const cur = ms[state.currentMatch];
   cur.classList.add("current");
+  // 畳まれたグループの中にある一致へは飛べないので、先に開く
+  const block = cur.closest(".grp");
+  if (block) setGroupOpen(block, true);
   cur.scrollIntoView({ block: "center", behavior: "smooth" });
   ui.matchInfo.textContent = state.currentMatch + 1 + "/" + ms.length;
 }
@@ -218,6 +316,7 @@ function runHistory() {
 
 function renderHistory(res) {
   state.mode = "history";
+  state.group = null; // 過去ログはログファイルの行なので、検知単位にまとめない
   ui.table.classList.add("history");
   search.rebuild(ui.search.value);
 
@@ -319,6 +418,15 @@ $("histBtn").addEventListener("click", runHistory);
 toggleButton("tCase", () => search.caseSensitive, (v) => { search.caseSensitive = v; onSearchChanged(); });
 toggleButton("tRegex", () => search.useRegex, (v) => { search.useRegex = v; onSearchChanged(); });
 toggleButton("wrap", () => state.wrap, (v) => { state.wrap = v; ui.log.classList.toggle("wrap", v); });
+toggleButton("grouping", () => state.grouping, (v) => {
+  state.grouping = v;
+  $("expandAll").disabled = !v;
+  if (state.mode === "live") rerenderLive();
+});
+toggleButton("expandAll", () => state.expandAll, (v) => {
+  state.expandAll = v;
+  setAllGroupsOpen(v);
+});
 
 $("autoscroll").addEventListener("click", () => {
   state.autoscroll = !state.autoscroll;
@@ -344,11 +452,15 @@ $("clear").addEventListener("click", () => {
   ui.count.textContent = "0";
   if (state.paused) ui.pause.textContent = "再開";
   state.mode = "live";
+  state.group = null;
   ui.banner.hidden = true;
   ui.table.classList.remove("history");
   showEmpty("クリアしました。新しいイベントを待機中…");
   state.currentMatch = -1;
   updateMatchInfo();
 });
+
+// 「全展開」はグループ表示のときだけ意味がある
+$("expandAll").disabled = !state.grouping;
 
 connect();

@@ -84,6 +84,72 @@ export function buildRow(ev) {
   return row;
 }
 
+/**
+ * 検知 1 件ぶんのグループを作る。
+ *
+ * detect 行を見出しにして、それに続く action 行を折りたたみできる子要素へ入れる。
+ * 「まず一致したファイルだけを一覧したい。中身は必要なときだけ開く」という
+ * 読み方ができるようにするための構造。
+ *
+ * 戻り値の `children` に action 行を追加し、結果が出るたびに
+ * [`updateGroupSummary`] で見出しの集計を書き換える。
+ */
+export function buildGroupBlock(detectEv) {
+  const block = el("div", "grp");
+  const head = buildRow(detectEv);
+  head.classList.add("grp-head");
+
+  // 開閉の目印。position:absolute なのでグリッドの列数には影響しない。
+  const twisty = el("span", "twisty", "▶");
+  head.insertBefore(twisty, head.firstChild);
+
+  // 集計は「内容」列の中に置く。列を増やすとヘッダーとずれるため。
+  const summary = el("span", "grp-summary");
+  head.querySelector(".c-body").appendChild(summary);
+
+  const children = el("div", "grp-children");
+
+  head.addEventListener("click", (e) => {
+    // 本文中のテキスト選択を邪魔しない
+    if (window.getSelection().toString()) return;
+    setGroupOpen(block, !block.classList.contains("open"));
+    e.preventDefault();
+  });
+
+  block.appendChild(head);
+  block.appendChild(children);
+  return { block, head, children, summary };
+}
+
+/** グループの開閉を切り替える。 */
+export function setGroupOpen(block, open) {
+  block.classList.toggle("open", open);
+  const twisty = block.querySelector(".twisty");
+  if (twisty) twisty.textContent = open ? "▼" : "▶";
+}
+
+/**
+ * 見出しに「アクション何件で、どういう結果だったか」を書く。
+ * 畳んだままでも失敗の有無が分かるようにするのが目的。
+ */
+export function updateGroupSummary(summary, counts) {
+  summary.innerHTML = "";
+  if (counts.total === 0) {
+    summary.appendChild(el("span", "grp-none", "アクションなし"));
+    return;
+  }
+  summary.appendChild(el("span", "grp-count", `アクション ${counts.total} 件`));
+  for (const [key, label, cls] of [
+    ["ok", "OK", "lv-ok"],
+    ["warn", "WARN", "lv-warn"],
+    ["error", "ERROR", "lv-error"],
+  ]) {
+    if (counts[key] > 0) {
+      summary.appendChild(el("span", "grp-tally " + cls, `${label} ${counts[key]}`));
+    }
+  }
+}
+
 /** 過去ログ検索の 1 行（列構成がライブとは別）。 */
 export function buildHistoryRow(hit) {
   const row = el("div", "hrow");
