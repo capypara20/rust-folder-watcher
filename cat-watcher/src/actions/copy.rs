@@ -6,9 +6,13 @@ use crate::error::AppError;
 use crate::placeholder::PlaceholderContext;
 
 use super::common::{
-    expand_action_destination, resolve_dest_path, try_copy_once, walk_files,
+    ensure_dest_dir, ensure_parent_dir, expand_action_destination, resolve_dest_path,
+    try_copy_once, walk_entries, TransferOptions,
 };
 use super::ActionSink;
+
+/// エラーメッセージ内でこのアクションを指す表記。
+const LABEL: &str = "コピー先";
 
 /// copy アクションのエントリポイント。
 /// 戻り値:
@@ -24,28 +28,14 @@ pub async fn execute(
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
     let dest_root = expand_action_destination(action, ctx)?;
-
-    let overwrite = action.overwrite.unwrap_or(false);
-    let preserve_structure = action.preserve_structure.unwrap_or(false);
-    let verify_integrity = action.verify_integrity.unwrap_or(false);
+    let opts = TransferOptions::from_action(action);
     let watch_path = Path::new(&ctx.watch_path);
 
     if src.is_dir() {
-        copy_directory_recursive(
-            src,
-            &dest_root,
-            watch_path,
-            overwrite,
-            preserve_structure,
-            verify_integrity,
-            retry,
-            sink,
-            step,
-        )
-        .await
+        copy_directory_recursive(src, &dest_root, watch_path, opts, retry, sink, step).await
     } else {
-        let dest_file = resolve_dest_path(src, &dest_root, watch_path, preserve_structure)?;
-        copy_one_file(src, &dest_file, overwrite, verify_integrity, retry, sink, step).await
+        let dest_file = resolve_dest_path(src, &dest_root, watch_path, opts.preserve_structure)?;
+        copy_one_file(src, &dest_file, opts, retry, sink, step).await
     }
 }
 
@@ -53,13 +43,12 @@ pub async fn execute(
 async fn copy_one_file(
     src: &Path,
     dest: &Path,
-    overwrite: bool,
-    verify_integrity: bool,
+    opts: TransferOptions,
     retry: &RetryConfig,
     sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
-    if dest.exists() && !overwrite {
+    if dest.exists() && !opts.overwrite {
         sink.warn(step.0, step.1, format!(
             "copy スキップ (overwrite=false で既存): {}",
             dest.display()
@@ -67,21 +56,13 @@ async fn copy_one_file(
         return Ok(None);
     }
 
-    if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            AppError::Action(format!(
-                "コピー先のディレクトリの作成に失敗 ({}): {}",
-                parent.display(),
-                e
-            ))
-        })?;
-    }
+    ensure_parent_dir(dest, opts.auto_create, LABEL).await?;
 
     let max_attempts = retry.count.saturating_add(1);
     let interval = Duration::from_millis(retry.interval_ms);
 
     for attempt in 1..=max_attempts {
-        match try_copy_once(src, dest, verify_integrity).await {
+        match try_copy_once(src, dest, opts.verify_integrity).await {
             Ok(maybe_hash) => {
                 let hash_suffix = maybe_hash
                     .map(|h| format!("  [BLAKE3: {h}]"))
@@ -112,50 +93,69 @@ async fn copy_one_file(
     unreachable!("リトライループは必ず return で抜ける");
 }
 
-/// ディレクトリ再帰コピー。配下ファイルを 1 つずつ copy_one_file に流す。
-#[allow(clippy::too_many_arguments)]
+/// ディレクトリ再帰コピー。空のサブフォルダも宛先に作ってから、
+/// 配下ファイルを 1 つずつ copy_one_file に流す。
 async fn copy_directory_recursive(
     src_dir: &Path,
     dest_root: &Path,
     watch_path: &Path,
-    overwrite: bool,
-    preserve_structure: bool,
-    verify_integrity: bool,
+    opts: TransferOptions,
     retry: &RetryConfig,
     sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
-    let folder_dest = if preserve_structure {
-        let rel = src_dir
-            .strip_prefix(watch_path)
-            .map_err(|e| AppError::Action(format!("relative_path の解決に失敗: {}", e)))?;
-        dest_root.join(rel)
+    let folder_dest = resolve_folder_dest(src_dir, dest_root, watch_path, opts.preserve_structure)?;
+    ensure_dest_dir(&folder_dest, opts.auto_create, LABEL).await?;
+
+    let (dirs, files) = walk_entries(src_dir).await?;
+
+    // 中身が空のサブフォルダも宛先に残すため、先にディレクトリ構造だけ作る。
+    for dir in &dirs {
+        let rel = relative_to(dir, src_dir)?;
+        ensure_dest_dir(&folder_dest.join(rel), opts.auto_create, LABEL).await?;
+    }
+
+    let mut copied = 0usize;
+    for entry in &files {
+        let rel = relative_to(entry, src_dir)?;
+        let entry_dest = folder_dest.join(rel);
+        if copy_one_file(entry, &entry_dest, opts, retry, sink, step).await?.is_some() {
+            copied += 1;
+        }
+    }
+
+    // フォルダ単位の完了もログに残す。中身が空だとファイル 1 件ごとの
+    // 行が 1 本も出ず、何も起きなかったように見えてしまうため。
+    sink.ok(step.0, step.1, format!(
+        "フォルダのコピー完了: {} → {}（ファイル {}/{} 件・サブフォルダ {} 件）",
+        src_dir.display(), folder_dest.display(), copied, files.len(), dirs.len()
+    ));
+
+    Ok(Some(folder_dest))
+}
+
+/// フォルダごと転送するときの宛先フォルダを決める。
+/// copy / move で同じ規則なので共有する。
+pub(super) fn resolve_folder_dest(
+    src_dir: &Path,
+    dest_root: &Path,
+    watch_path: &Path,
+    preserve_structure: bool,
+) -> Result<PathBuf, AppError> {
+    if preserve_structure {
+        Ok(dest_root.join(relative_to(src_dir, watch_path)?))
     } else {
         let folder_name = src_dir
             .file_name()
             .ok_or_else(|| AppError::Action("フォルダ名の取得に失敗".to_string()))?;
-        dest_root.join(folder_name)
-    };
-
-    tokio::fs::create_dir_all(&folder_dest).await.map_err(|e| {
-        AppError::Action(format!(
-            "コピー先フォルダ作成失敗 ({}): {}",
-            folder_dest.display(),
-            e
-        ))
-    })?;
-
-    let entries = walk_files(src_dir).await?;
-
-    for entry in entries {
-        let rel = entry
-            .strip_prefix(src_dir)
-            .map_err(|e| AppError::Action(format!("配下相対パス解決失敗: {}", e)))?;
-        let entry_dest = folder_dest.join(rel);
-        copy_one_file(&entry, &entry_dest, overwrite, verify_integrity, retry, sink, step).await?;
+        Ok(dest_root.join(folder_name))
     }
+}
 
-    Ok(Some(folder_dest))
+/// `base` からの相対パスを取り出す。取れない場合はアクションエラーにする。
+pub(super) fn relative_to<'a>(path: &'a Path, base: &Path) -> Result<&'a Path, AppError> {
+    path.strip_prefix(base)
+        .map_err(|e| AppError::Action(format!("相対パスの解決に失敗 ({}): {}", path.display(), e)))
 }
 
 #[cfg(test)]

@@ -211,6 +211,114 @@ fn test_dir_patterns() {
     assert!(!evaluate_rule(&direct, &events, None, &rule));
 }
 
+// ── include_hidden (#69) ──────────────────────────────────────────────
+// 「隠し」の作り方は OS で違うため、テスト側もプラットフォームごとに分ける。
+//   Windows: FILE_ATTRIBUTE_HIDDEN 属性を立てる
+//   それ以外: ファイル名を "." 始まりにする
+
+/// 隠しエントリを 1 つ作り、そのパスを返す。
+#[cfg(windows)]
+fn make_hidden_file(dir: &Path) -> PathBuf {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN};
+
+    let path = dir.join("secret.txt");
+    std::fs::write(&path, "").unwrap();
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: wide は NUL 終端された有効な UTF-16 バッファ。
+    let ok = unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
+    assert!(ok != 0, "隠し属性の付与に失敗");
+    path
+}
+
+#[cfg(not(windows))]
+fn make_hidden_file(dir: &Path) -> PathBuf {
+    let path = dir.join(".secret.txt");
+    std::fs::write(&path, "").unwrap();
+    path
+}
+
+// include_hidden = false のとき隠しエントリは除外され、通常ファイルは通る。
+#[test]
+fn test_include_hidden_false_excludes_hidden_entry() {
+    let dir = TempDir::new().unwrap();
+    let hidden = make_hidden_file(dir.path());
+    let visible = dir.path().join("open.txt");
+    std::fs::write(&visible, "").unwrap();
+
+    let rule = make_rule(dir.path().to_str().unwrap(), false, None);
+    assert!(!rule.include_hidden, "make_rule の既定は include_hidden=false");
+    let events = create_events(Event::Create);
+
+    assert!(!evaluate_rule(&hidden, &events, None, &rule), "隠しエントリは除外されるべき");
+    assert!(evaluate_rule(&visible, &events, None, &rule), "通常ファイルは通るべき");
+}
+
+// include_hidden = true なら隠しエントリも検知対象になる。
+#[test]
+fn test_include_hidden_true_allows_hidden_entry() {
+    let dir = TempDir::new().unwrap();
+    let hidden = make_hidden_file(dir.path());
+
+    let mut rule = make_rule(dir.path().to_str().unwrap(), false, None);
+    rule.include_hidden = true;
+    let events = create_events(Event::Create);
+
+    assert!(evaluate_rule(&hidden, &events, None, &rule));
+}
+
+// 削除イベントのようにパスが既に消えている場合は属性を取得できない。
+// 取りこぼしを避けるため「隠しではない」とみなして処理対象に残す。
+#[test]
+fn test_include_hidden_missing_path_is_not_treated_as_hidden() {
+    let dir = TempDir::new().unwrap();
+    let deleted = dir.path().join("already_deleted.txt");
+
+    let rule = make_rule(dir.path().to_str().unwrap(), false, None);
+    let events = create_events(Event::Create);
+
+    assert!(evaluate_rule(&deleted, &events, None, &rule));
+}
+
+// 隠しフォルダ配下の通常ファイルは、親を遡って除外しない（設計書 §14.5）。
+#[test]
+fn test_include_hidden_does_not_walk_up_parents() {
+    let dir = TempDir::new().unwrap();
+    let hidden_dir = {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            use windows_sys::Win32::Storage::FileSystem::{
+                SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN,
+            };
+            let d = dir.path().join("hiddendir");
+            std::fs::create_dir(&d).unwrap();
+            let wide: Vec<u16> = d.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+            // SAFETY: wide は NUL 終端された有効な UTF-16 バッファ。
+            unsafe { SetFileAttributesW(wide.as_ptr(), FILE_ATTRIBUTE_HIDDEN) };
+            d
+        }
+        #[cfg(not(windows))]
+        {
+            let d = dir.path().join(".hiddendir");
+            std::fs::create_dir(&d).unwrap();
+            d
+        }
+    };
+    let inner = hidden_dir.join("normal.txt");
+    std::fs::write(&inner, "").unwrap();
+
+    let rule = make_rule(dir.path().to_str().unwrap(), true, None);
+    let events = create_events(Event::Create);
+
+    assert!(evaluate_rule(&inner, &events, None, &rule), "親が隠しでもファイル自体が隠しでなければ通す");
+    assert!(!evaluate_rule(&hidden_dir, &events, None, &rule), "隠しフォルダ自体は除外");
+}
+
 // dir_regex: フォルダ名正規表現包含 (#28)
 #[test]
 fn test_dir_regex() {

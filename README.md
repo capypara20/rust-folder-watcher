@@ -114,7 +114,16 @@ cat-watcher -g global.toml -r rules.toml
 cat-watcher --from-csv rules.csv --output rules.toml
 ```
 
-引数なしで起動すると使い方のガイドが表示されます。
+`--global` / `--rules` を省略すると、`global.toml` / `rules.toml` を
+**カレントディレクトリ → 実行ファイルと同じフォルダ** の順に探します。
+実行ファイルと設定を同じフォルダに置いておけば、引数なしでそのまま起動できます。
+
+```powershell
+# C:\cat-watcher\ に cat-watcher.exe / global.toml / rules.toml を置いた場合
+cat-watcher
+```
+
+設定ファイルが見つからず引数もない場合は、使い方のガイドが表示されます。
 
 ## 設定リファレンス
 
@@ -136,6 +145,33 @@ file_name = "system_{Date}.log"       # {Date} / {DateTime} を埋め込み可
 rotation  = "daily"                   # daily / never
 level     = "info"                    # trace / debug / info / warn / error
 console   = true                      # コンソールへの出力 ON/OFF
+
+# 起動時スキャン（省略可・既定 ON）
+# 起動直後に監視フォルダを 1 度だけ走査し、既にあるファイルを create として拾う。
+[startup_scan]
+enabled = true
+
+# コピー/移動先フォルダの自動作成（省略可・既定 ON）
+# true : 宛先が無ければ実行時に自動作成する。起動時は「ドライブや共有そのものが
+#        存在するか」だけを確認する
+# false: 自動作成しない。宛先が無ければ起動時にバリデーションエラー、
+#        実行時に無ければアクション失敗にする（typo 検出を優先したいとき）
+# アクション側に auto_create を書けば、この既定値を個別に上書きできる。
+[destination]
+auto_create = true
+
+# 検知のデバウンス（省略可）
+# 最後のイベントから debounce_ms だけ静かになったら「確定」として 1 回処理する。
+#   巨大ファイルの書き込み完了を待ちたい → 長め（例: 3000）
+#   とにかく速く反応させたい             → 短め（例: 200）
+# poll_interval_ms は確定したものを見に行く間隔（1 以上必須）。
+[detect]
+debounce_ms      = 500
+poll_interval_ms = 100
+
+# Windows サービス設定（省略可・CLI 起動では参照されない）
+[service]
+run_as_logged_in_user = true
 ```
 
 > **v1.3.0 でログ設定は破壊的に変更されました。** 旧 `[global]`（`log_level` /
@@ -153,7 +189,7 @@ name    = "csv-backup"
 path             = "C:\\data\\incoming"      # ~ によるホームディレクトリ展開も可（例: ~/data）
 recursive        = true
 target           = "file"                # file / directory / both
-include_hidden   = false                 # ※現バージョンでは未実装（値は無視される）
+include_hidden   = false                 # 隠しファイル/フォルダを検知対象に含めるか
 patterns         = ["*.csv", "*.xlsx"]   # glob（regex と排他）
 # regex          = ".*\\.csv$"           # 正規表現（patterns と排他）
 exclude_patterns = ["temp_*"]            # glob（exclude_regex と排他）
@@ -181,16 +217,15 @@ file_name = "action_csv-backup_{Date}.log"
 rotation  = "daily"
 
 # ──────────── アクションチェーン ────────────
-[[rules.actions]]
-type    = "log"
-message = "検知: {BaseName}"
-
+# 検知内容もアクションの結果も自動でログに残るため、
+# 記録目的だけのアクションを書く必要はありません。
 [[rules.actions]]
 type               = "copy"
 destination        = "D:\\backup\\{Date}"
 overwrite          = false
 preserve_structure = true
 verify_integrity   = true                # BLAKE3 でコピー検証
+# auto_create      = true                # 省略時は global.toml の [destination] に従う
 
 [[rules.actions]]
 type        = "command"
@@ -198,7 +233,28 @@ shell       = "powershell"               # Windows: cmd / powershell / pwsh
                                          # Linux・macOS: bash / sh / pwsh
 command     = "Write-Host 'Backed up: {Name} -> {Destination}'"
 working_dir = ""
+delay_ms    = 2000                       # このアクションの実行前に待つミリ秒（省略時 0）
 ```
+
+### アクション共通のオプション
+
+| キー | 型 | 説明 |
+|---|---|---|
+| `delay_ms` | 整数 | このアクションを実行する前に待つミリ秒。省略時は 0。デバウンスだけでは足りないとき（巨大ファイルの書き込み完了待ち、前のアクションが起動した外部スクリプトの出力待ち）に使う |
+| `auto_create` | 真偽値 | copy / move 専用。宛先フォルダの自動作成を、この 1 アクションだけ切り替える。省略時は `global.toml` の `[destination] auto_create` に従う |
+
+### 隠しファイル・隠しフォルダ（`include_hidden`）
+
+`include_hidden = false`（既定）にすると、隠しエントリを検知対象から外します。「隠し」の判定は OS の流儀に合わせます。
+
+| OS | 判定方法 | 例 |
+|---|---|---|
+| Windows | `FILE_ATTRIBUTE_HIDDEN` 属性 | `desktop.ini` / `Thumbs.db`（Explorer が自動で属性を付ける） |
+| Linux ほか | ファイル名が `.` で始まる | `.gitignore` / `.cache` |
+
+- 判定するのは**そのエントリ自身だけ**です。親フォルダが隠しでも、中の通常ファイルは処理対象になります
+- 削除イベントなどで属性を取得できない場合は「隠しではない」として処理します（取りこぼしを避けるため）
+- Windows で `.env` のようなドット始まりのファイルは、隠し属性が付いていなければ**隠し扱いになりません**。除外したい場合は `exclude_regex = "^\\."` を使ってください
 
 ## フィルタ設定
 
@@ -530,19 +586,39 @@ systemctl status cat-watcher
 ## CSV からの変換
 
 CSV の列順（1 行目はヘッダー、自動でスキップ）：
-** 未検証... **
+
+```
+ 1 rule_name             10 events                 19 args
+ 2 enabled               11 action_type            20 working_dir
+ 3 watch_path            12 destination            21 exclude_regex
+ 4 recursive             13 overwrite              22 dir_patterns
+ 5 target                14 preserve_structure     23 dir_regex
+ 6 include_hidden        15 verify_integrity       24 exclude_dir_patterns
+ 7 patterns              16 shell                  25 exclude_dir_regex
+ 8 regex                 17 command                26 auto_create
+ 9 exclude_patterns      18 program                27 delay_ms
+```
+
+1 行に並べると次のとおりです。
 
 ```
 rule_name, enabled, watch_path, recursive, target, include_hidden,
-patterns, regex, exclude_patterns, exclude_regex,
-dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex, events,
+patterns, regex, exclude_patterns, events,
 action_type, destination, overwrite, preserve_structure, verify_integrity,
-shell, command, program, args, working_dir, message
+shell, command, program, args, working_dir,
+exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex,
+auto_create, delay_ms
 ```
 
 - 同じ `rule_name` の行を複数並べると、1 ルールに複数アクションを定義できます
 - 配列フィールド（`patterns` / `events` / `args` 等）は `|` 区切り（例: `create|modify`）
-- `log` アクションは `action_type = "log"` とし、`message` 列にメッセージを記入します
+- 真偽値は `true` / `false`。Excel が書き出す `TRUE` / `FALSE`、`1` / `0`、`yes` / `no` も受け付けます
+- `action_type` は `copy` / `move` / `command` / `execute` のいずれかです
+- ヘッダー行がある場合、列の並びが上の定義と一致するか起動時に検証されます
+  （ズレたまま読み込んで別物のルールを作らないようにするため）
+- 列 21 以降（`exclude_regex` 〜）は省略できます。古い CSV との後方互換のため、
+  **新しい列は必ず末尾に追加**されます
+- Windows パス（`C:\tool\app.exe`）や引用符を含む値もそのまま書けます
 
 `--init csv` でヘッダー付きのサンプル CSV を生成できます。
 

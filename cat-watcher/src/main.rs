@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::Local;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use colored::Colorize;
 
 use crate::error::AppError;
@@ -31,6 +31,10 @@ const AFTER_LONG_HELP: &str = "\
   監視の起動:
     cat-watcher -g global.toml -r rules.toml
     cat-watcher -g global.toml -r rules.toml --validate
+    cat-watcher                            # ↓ 既定名を自動で探して起動
+
+  \x1b[2m-g / -r を省略すると global.toml / rules.toml を
+   「カレントディレクトリ → 実行ファイルと同じフォルダ」の順に探します。\x1b[0m
 
   テンプレート生成（複数同時指定可）:
     cat-watcher --init global rules        # global.toml と rules.toml を同時生成
@@ -56,12 +60,14 @@ const AFTER_LONG_HELP: &str = "\
   rule_name, enabled, watch_path, recursive, target, include_hidden,
   patterns, regex, exclude_patterns, events,
   action_type, destination, overwrite, preserve_structure, verify_integrity,
-  shell, command, program, args, working_dir, message,
-  exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex
+  shell, command, program, args, working_dir,
+  exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex,
+  auto_create, delay_ms
 
   複数アクションのルール: rule_name を同じにして行を追加
   複数値フィールド（patterns / events / args 等）: | で区切る  例: create|modify
-  ※ 列22以降（exclude_regex〜）は省略可（既存 CSV との後方互換のため末尾）
+  真偽値: true / false（Excel の TRUE / FALSE、1 / 0、yes / no も可）
+  ※ 列21以降（exclude_regex〜）は省略可（既存 CSV との後方互換のため末尾）
 ";
 
 #[derive(clap::ValueEnum, Clone)]
@@ -76,10 +82,7 @@ enum InitType {
 
 /// ファイル監視・自動処理ツール
 #[derive(Parser)]
-#[command(
-    arg_required_else_help = true,
-    after_long_help = AFTER_LONG_HELP,
-)]
+#[command(after_long_help = AFTER_LONG_HELP)]
 struct Args {
     /// グローバル設定ファイルのパス
     #[arg(short, long, value_name = "FILE")]
@@ -110,6 +113,18 @@ fn main() {
     }
 
     let args = Args::parse();
+
+    // 引数なしで起動された場合、設定ファイルが既定の場所に無ければヘルプを出す。
+    // 逆に exe と同じフォルダに global.toml / rules.toml を置いてあれば、
+    // ダブルクリックやオプションなしのサービス登録でもそのまま監視を始められる。
+    if std::env::args_os().len() <= 1
+        && (config::find_config_file("global.toml").is_none()
+            || config::find_config_file("rules.toml").is_none())
+    {
+        let _ = Args::command().print_long_help();
+        println!();
+        std::process::exit(2);
+    }
 
     if let Some(ref csv_path) = args.from_csv {
         exit_on_err(csv_import::run(csv_path, args.output.as_deref()));
@@ -159,15 +174,15 @@ fn main() {
 }
 
 async fn run(cli: &Args) -> Result<(), AppError> {
-    let global_path = cli.global.as_ref().ok_or_else(|| {
-        AppError::Config("--global オプションが未指定です".to_string())
-    })?;
-    let rules_path = cli.rules.as_ref().ok_or_else(|| {
-        AppError::Config("--rules オプションが未指定です".to_string())
-    })?;
+    // 明示指定が無ければ、カレントディレクトリ／実行ファイル横の既定名を探す。
+    let global_path = config::resolve_config_path(cli.global.clone(), "global.toml", "--global")?;
+    let rules_path = config::resolve_config_path(cli.rules.clone(), "rules.toml", "--rules")?;
 
-    let global_config = config::load_global_config(global_path)?;
-    let rules_conf = config::load_rules_config(rules_path)?;
+    let global_config = config::load_global_config(&global_path)?;
+    let mut rules_conf = config::load_rules_config(&rules_path)?;
+    // global 側の既定値をアクションへ焼き込んでから検証する
+    // （バリデーションと実行時が同じ値を見るようにするため）。
+    config::apply_global_defaults(&global_config, &mut rules_conf);
 
     config::validate_global_config(&global_config)?;
     config::validate_rules_config(&rules_conf)?;
@@ -191,19 +206,18 @@ async fn run(cli: &Args) -> Result<(), AppError> {
         global_path.display(),
         rules_path.display()
     ));
+    // 実行アカウントを出しておく。ネットワーク共有（UNC）が見えるかどうかは
+    // このアカウントの権限で決まるため、切り分けの出発点になる。
+    #[cfg(windows)]
+    log.info(format!("実行アカウント={}", platform::current_account()));
 
     // ダッシュボード（既定で同梱・設定 enabled=true のときだけ起動）。
     // 監視を開始する前にハブを初期化し、HTTP/SSE サーバを別タスクで起動する。
     #[cfg(feature = "dashboard")]
     dashboard::start(&global_config, &rules_conf.rules, Arc::clone(&log));
 
-    let result = watcher::start_watching(
-        &rules_conf.rules,
-        &global_config.retry,
-        global_config.scan_on_start(),
-        Arc::clone(&log),
-    )
-    .await;
+    let result =
+        watcher::start_watching(&rules_conf.rules, &global_config, Arc::clone(&log)).await;
     if let Err(e) = &result {
         // 監視処理の異常終了はシステム階層のエラーとしてシステムログに残す。
         log.error(format!("監視処理が異常終了しました: {e}"));

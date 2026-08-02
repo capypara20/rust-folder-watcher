@@ -117,7 +117,8 @@ fn run_watcher(
 
     rt.block_on(async {
         let global_config = config::load_global_config(&args.global)?;
-        let rules_conf = config::load_rules_config(&args.rules)?;
+        let mut rules_conf = config::load_rules_config(&args.rules)?;
+        config::apply_global_defaults(&global_config, &mut rules_conf);
 
         config::validate_global_config(&global_config)?;
         config::validate_rules_config(&rules_conf)?;
@@ -126,7 +127,12 @@ fn run_watcher(
         let (log, log_handle) = Logger::new_system(&global_config.system_log, false)?;
         let log = Arc::new(log);
 
-        log.info("Windowsサービスとして起動しました".to_string());
+        // 実行アカウントを最初に出す。ネットワーク共有が見えない／外部プロセスが
+        // SYSTEM で動く、といった相談はここを確認するのが出発点になる。
+        log.info(format!(
+            "Windowsサービスとして起動しました  実行アカウント={}",
+            crate::platform::current_account()
+        ));
 
         // サービスは既定で SYSTEM 権限で動くため、設定が有効なら外部プロセス
         // （command / execute）をアクティブなログオンユーザー権限で起動する。
@@ -147,7 +153,7 @@ fn run_watcher(
         crate::dashboard::start(&global_config, &rules_conf.rules, Arc::clone(&log));
 
         let result = tokio::select! {
-            result = watcher::start_watching(&rules_conf.rules, &global_config.retry, global_config.scan_on_start(), Arc::clone(&log)) => result,
+            result = watcher::start_watching(&rules_conf.rules, &global_config, Arc::clone(&log)) => result,
             _ = stop_rx => {
                 let _ = status_handle.set_service_status(ServiceStatus {
                     service_type: ServiceType::OWN_PROCESS,
@@ -206,12 +212,10 @@ fn parse_service_args() -> Result<ServiceArgs, AppError> {
         i += 1;
     }
 
-    let global = global.ok_or_else(|| {
-        AppError::Config("--global オプションが未指定です".to_string())
-    })?;
-    let rules = rules.ok_or_else(|| {
-        AppError::Config("--rules オプションが未指定です".to_string())
-    })?;
-
-    Ok(ServiceArgs { global, rules })
+    // binPath= にオプションを書かずにサービス登録した場合でも、
+    // 実行ファイルと同じフォルダの global.toml / rules.toml を拾って起動できる。
+    Ok(ServiceArgs {
+        global: config::resolve_config_path(global, "global.toml", "--global")?,
+        rules: config::resolve_config_path(rules, "rules.toml", "--rules")?,
+    })
 }

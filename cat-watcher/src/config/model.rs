@@ -19,6 +19,12 @@ pub struct GlobalConfig {
     /// 起動時スキャン設定（省略可）。未指定なら有効（既定 ON）。
     #[serde(default)]
     pub startup_scan: Option<StartupScanConfig>,
+    /// copy / move の宛先フォルダの扱い（省略可）。未指定なら自動作成する。
+    #[serde(default)]
+    pub destination: Option<DestinationConfig>,
+    /// 検知のデバウンス設定（省略可）。未指定なら既定値を使う。
+    #[serde(default)]
+    pub detect: Option<DetectConfig>,
     /// Windows サービス設定（省略可）。未指定なら既定値を使う。
     // service フィールドは Windows のサービス起動経路でのみ参照するため、
     // 非 Windows ビルドでは未使用になる。
@@ -36,6 +42,31 @@ impl GlobalConfig {
             .as_ref()
             .map(|s| s.enabled)
             .unwrap_or(true)
+    }
+
+    /// copy / move の宛先フォルダが無いときに自動作成するか（全ルール共通の既定値）。
+    /// 各アクションの `auto_create` で個別に上書きできる。セクション未指定なら ON。
+    pub fn auto_create_destination(&self) -> bool {
+        self.destination
+            .as_ref()
+            .map(|d| d.auto_create)
+            .unwrap_or(true)
+    }
+
+    /// 最後のイベントからこの時間だけ静かになったら「確定」とみなす（ミリ秒）。
+    pub fn debounce_ms(&self) -> u64 {
+        self.detect
+            .as_ref()
+            .map(|d| d.debounce_ms)
+            .unwrap_or(DEFAULT_DEBOUNCE_MS)
+    }
+
+    /// デバウンス済みのパスが無いか確認する間隔（ミリ秒）。
+    pub fn poll_interval_ms(&self) -> u64 {
+        self.detect
+            .as_ref()
+            .map(|d| d.poll_interval_ms)
+            .unwrap_or(DEFAULT_POLL_INTERVAL_MS)
     }
 
     /// Windows サービス起動時に、外部プロセス（command / execute）を
@@ -77,6 +108,46 @@ pub struct StartupScanConfig {
     /// 起動時スキャンを行うか。
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+/// copy / move の宛先フォルダの扱い（全ルール共通の既定値）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DestinationConfig {
+    /// 宛先フォルダが存在しないときに自動作成するか。
+    ///
+    /// - `true`（既定）: 実行時に再帰的に作成する。起動時の存在チェックは
+    ///   「ドライブや共有そのものが存在するか」だけに緩める。
+    /// - `false`: 自動作成しない。起動時に宛先が無ければバリデーションエラー、
+    ///   実行時に無ければアクション失敗にする（typo で予期しない場所に
+    ///   書き込むのを防ぎたいとき用）。
+    #[serde(default = "default_true")]
+    pub auto_create: bool,
+}
+
+/// 検知のデバウンス設定。エディタや同期ソフトが出す連続イベントを束ねる。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DetectConfig {
+    /// 最後のイベントからこの時間だけ静かになったら確定とみなす（ミリ秒）。
+    /// 大きいファイルの書き込み完了を待ちたい場合は長めにする。
+    #[serde(default = "default_debounce_ms")]
+    pub debounce_ms: u64,
+    /// 確定済みのパスが無いか確認する間隔（ミリ秒）。短いほど反応が速く、
+    /// その分 CPU を使う。通常は既定値のままでよい。
+    #[serde(default = "default_poll_interval_ms")]
+    pub poll_interval_ms: u64,
+}
+
+pub const DEFAULT_DEBOUNCE_MS: u64 = 500;
+pub const DEFAULT_POLL_INTERVAL_MS: u64 = 100;
+
+fn default_debounce_ms() -> u64 {
+    DEFAULT_DEBOUNCE_MS
+}
+
+fn default_poll_interval_ms() -> u64 {
+    DEFAULT_POLL_INTERVAL_MS
 }
 
 /// ダッシュボード（ブラウザでログをリアルタイム表示する localhost HTTP サーバ）設定。
@@ -195,6 +266,11 @@ pub struct ActionConfig {
     pub overwrite: Option<bool>,
     pub verify_integrity: Option<bool>,
     pub preserve_structure: Option<bool>,
+    /// 宛先フォルダを自動作成するか。未指定なら global.toml の
+    /// `[destination] auto_create` に従う（設定読み込み後に解決され、
+    /// バリデーションと実行時はどちらもここに入った値だけを見る）。
+    #[serde(default)]
+    pub auto_create: Option<bool>,
 
     // typeがCommand / Executeのとき
     pub working_dir: Option<String>,
@@ -207,6 +283,11 @@ pub struct ActionConfig {
     pub program: Option<String>,
     pub args: Option<Vec<String>>,
 
-    // typeがLogのとき
-    pub message: Option<String>,
+    /// このアクションを実行する前に待つ時間（ミリ秒）。省略時は 0（待たない）。
+    ///
+    /// デバウンスだけでは足りないケース向けの逃げ道。たとえば
+    /// 「巨大ファイルの書き込みが完全に終わるまで待ってからコピーしたい」
+    /// 「前のアクションで起動した外部スクリプトの出力が出揃うまで待ちたい」など。
+    #[serde(default)]
+    pub delay_ms: Option<u64>,
 }

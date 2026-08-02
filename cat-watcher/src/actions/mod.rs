@@ -11,7 +11,7 @@ use std::sync::Arc;
 use crate::config::{ActionConfig, ActionType, RetryConfig};
 use crate::error::AppError;
 use crate::logger::Logger;
-use crate::placeholder::{expand_placeholders, PlaceholderContext};
+use crate::placeholder::PlaceholderContext;
 
 /// アクション結果（開始・成功・失敗・警告・補足）を
 /// system ロガー（ターミナル表示用）と action ロガー（ファイル記録用）の
@@ -90,6 +90,13 @@ pub async fn execute_chain(
         let index = i + 1;
         let step = (index, total);
 
+        // delay_ms が設定されていれば、このアクションの直前で待つ。
+        // 書き込みが終わりきらないうちにコピーが走るのを避けたいとき等に使う。
+        if let Some(delay) = action.delay_ms.filter(|ms| *ms > 0) {
+            sink.note(index, total, format!("delay_ms={delay} のため待機します"));
+            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+        }
+
         let result: Result<Option<std::path::PathBuf>, AppError> = match action.type_ {
             ActionType::Copy => {
                 let dest_str = action.destination.as_deref().unwrap_or("");
@@ -119,17 +126,6 @@ pub async fn execute_chain(
                 let detail = format!("{program} {args_str}").trim_end().to_string();
                 sink.action_start(index, total, "execute", detail);
                 execute::execute(action, &ctx, &sink, step).await.map(|_| None)
-            }
-            ActionType::Log => {
-                let raw = action.message.as_deref().unwrap_or("");
-                sink.action_start(index, total, "log", String::new());
-                match expand_placeholders(raw, &ctx) {
-                    Ok(msg) => {
-                        sink.ok(index, total, msg);
-                        Ok(None)
-                    }
-                    Err(e) => Err(e),
-                }
             }
         };
 

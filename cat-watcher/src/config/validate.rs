@@ -7,6 +7,7 @@ use regex::Regex;
 
 use super::model::{ActionConfig, GlobalConfig, RulesConfig};
 use super::types::ActionType;
+use crate::actions::command::VALID_SHELLS;
 use crate::error::AppError;
 use crate::placeholder::validate_placeholders;
 
@@ -76,6 +77,10 @@ pub fn validate_global_config(config: &GlobalConfig) -> Result<(), AppError> {
 				dashboard.bind
 			));
 		}
+	}
+	// 0 を渡すと tokio のタイマーが作れずパニックするため、ここで止める。
+	if config.poll_interval_ms() == 0 {
+		errors.push("detect.poll_interval_ms は 1 以上にしてください（0 では検知の確認処理が回りません）".to_string());
 	}
 	finish_validation(errors)
 }
@@ -218,7 +223,7 @@ pub fn validate_rules_config(config: &RulesConfig) -> Result<(), AppError> {
 ///   "C:/data/backup/{Date}/sub" → "C:/data/backup/"
 ///   "C:/data/backup/{Date}"     → "C:/data/backup/"
 ///   "C:/data/backup"            → "C:/data/backup"
-///   "{Date}"                    → "" (空文字列 = 不正扱い)
+///   "{WatchPath}/out"           → "" (静的部分なし = 実行時まで判定不能)
 pub(crate) fn static_root_of_destination(dest: &str) -> &str {
 	match dest.find('{') {
 		Some(idx) => {
@@ -232,6 +237,57 @@ pub(crate) fn static_root_of_destination(dest: &str) -> &str {
 		}
 		None => dest,
 	}
+}
+
+/// copy / move の destination をロード時に検査する。
+///
+/// 実行時は宛先フォルダを自動作成する（`auto_create = true`）ため、
+/// 「フォルダがまだ無い」だけでは起動を止めない。ただしドライブや共有そのものが
+/// 無い（例: 未接続の `Z:\backup`）と実行時に毎回失敗し続けるので、
+/// **先祖をたどっても実在するフォルダが 1 つも無い**場合はエラーにする。
+///
+/// `auto_create = false` のときは従来どおり、静的部分が実在するディレクトリで
+/// あることを要求する（typo による予期しない書き込みをロード時に検出したい用途）。
+pub(crate) fn collect_destination_errors(
+	dest: &str,
+	auto_create: bool,
+	rule_name: &str,
+	errors: &mut Vec<String>,
+) {
+	let static_root = static_root_of_destination(dest);
+	// "{WatchPath}/out" のように先頭からプレースホルダーで始まる場合は、
+	// 展開してみないと分からないのでロード時には判定しない。
+	if static_root.is_empty() {
+		return;
+	}
+
+	let path = Path::new(static_root);
+	if !auto_create {
+		if !path.is_dir() {
+			errors.push(format!(
+				"監視ルール名 {} のアクションの destination(コピー先/移動先) のルート '{}' が存在しません（auto_create = true にすると実行時に自動作成できます）",
+				rule_name, static_root
+			));
+		}
+		return;
+	}
+
+	// 相対パスはプロセスの作業ディレクトリ基準になり、ここでは判定できない。
+	if !path.is_absolute() {
+		return;
+	}
+	if !has_existing_ancestor(path) {
+		errors.push(format!(
+			"監視ルール名 {} のアクションの destination(コピー先/移動先) '{}' は、親をたどっても実在するフォルダが見つかりません（ドライブレターやネットワーク共有名を確認してください）",
+			rule_name, static_root
+		));
+	}
+}
+
+/// そのパス自身か、先祖のいずれかが実在するディレクトリなら true。
+fn has_existing_ancestor(path: &Path) -> bool {
+	path.ancestors()
+		.any(|p| !p.as_os_str().is_empty() && p.is_dir())
 }
 
 pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
@@ -250,19 +306,31 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 				errors.push(format!("監視ルール名 {} のアクションの type が Copy / Move のとき、verify_integrity(コピー後にファイルの完全性を検証するか) を定義してください", rule_name));
 			}
 			if let Some(dest) = &action.destination {
-				let static_root = static_root_of_destination(dest);
-				if !Path::new(static_root).is_dir() {
-					errors.push(format!(
-						"監視ルール名 {} のアクションの destination(コピー先/移動先) のルート '{}' が存在しません",
-						rule_name, static_root
-					));
-				}
+				// auto_create は設定読み込み時に global の既定値が焼き込まれている。
+				// 未解決（None）のまま来た場合は自動作成側を既定とする。
+				collect_destination_errors(
+					dest,
+					action.auto_create.unwrap_or(true),
+					rule_name,
+					errors,
+				);
 			}
 		}
 
 		ActionType::Command => {
 			if action.shell.is_none() {
 				errors.push(format!("監視ルール名 {} のアクションの type が Command のとき、shell(コマンドを実行するシェル) を定義してください", rule_name));
+			}
+			// 起動時に弾かないと、実行時に検知のたび失敗し続けることになる。
+			if let Some(shell) = &action.shell {
+				if !VALID_SHELLS.contains(&shell.to_lowercase().as_str()) {
+					errors.push(format!(
+						"監視ルール名 {} のアクションの shell '{}' はこの OS では使用できません。{} のいずれかを指定してください",
+						rule_name,
+						shell,
+						VALID_SHELLS.join(" / ")
+					));
+				}
 			}
 			if action.command.is_none() {
 				errors.push(format!("監視ルール名 {} のアクションの type が Command のとき、command(実行するコマンド) を定義してください", rule_name));
@@ -300,11 +368,6 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 			}
 		}
 
-		ActionType::Log => {
-			if action.message.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Log のとき、message(出力するメッセージ) を定義してください", rule_name));
-			}
-		}
 	}
 }
 
@@ -314,7 +377,6 @@ fn collect_action_placeholder_errors(action: &ActionConfig, rule_name: &str, err
 		("action.command", &action.command),
 		("action.working_dir", &action.working_dir),
 		("action.program", &action.program),
-		("action.message", &action.message),
 	];
 	for (field_name, field_value) in fields {
 		if let Some(value) = field_value {

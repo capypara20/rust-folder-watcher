@@ -56,11 +56,39 @@ fn resolve_dest_path_flat_and_preserve() {
 }
 
 #[tokio::test]
-async fn walk_files_returns_all_files() {
+async fn walk_entries_separates_dirs_and_files() {
     let dir = tempdir().unwrap();
     write_file(&dir.path().join("a.txt"), b"a");
     write_file(&dir.path().join("sub/b.txt"), b"b");
     write_file(&dir.path().join("sub/deep/c.txt"), b"c");
-    let files = walk_files(dir.path()).await.unwrap();
+    // 中身が空のフォルダも「ディレクトリ」として列挙される必要がある
+    // （宛先に再現しないと move で消えてしまうため）。
+    std::fs::create_dir(dir.path().join("empty")).unwrap();
+
+    let (dirs, files) = walk_entries(dir.path()).await.unwrap();
+
     assert_eq!(files.len(), 3);
+    let mut dir_names: Vec<String> = dirs
+        .iter()
+        .map(|d| d.strip_prefix(dir.path()).unwrap().to_string_lossy().replace('\\', "/"))
+        .collect();
+    dir_names.sort();
+    assert_eq!(dir_names, vec!["empty", "sub", "sub/deep"]);
+}
+
+#[tokio::test]
+async fn ensure_dest_dir_creates_only_when_auto_create() {
+    let dir = tempdir().unwrap();
+    let target = dir.path().join("a/b/c");
+
+    // auto_create=false → 作らずエラー
+    assert!(ensure_dest_dir(&target, false, "コピー先").await.is_err());
+    assert!(!target.exists());
+
+    // auto_create=true → 再帰的に作る
+    ensure_dest_dir(&target, true, "コピー先").await.unwrap();
+    assert!(target.is_dir());
+
+    // 既に存在する場合は auto_create=false でも通る
+    ensure_dest_dir(&target, false, "コピー先").await.unwrap();
 }

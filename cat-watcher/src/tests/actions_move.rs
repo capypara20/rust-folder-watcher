@@ -90,6 +90,68 @@ async fn moves_directory_recursively() {
     assert!(!src_dir.exists(), "移動元フォルダが削除されていない");
 }
 
+// overwrite=false でスキップしたファイルがあるのに移動元フォルダごと
+// remove_dir_all していたバグの回帰テスト。スキップ分が消えてはいけない。
+#[tokio::test]
+async fn skipped_files_are_not_deleted_with_source_folder() {
+    let watch = tempdir().unwrap();
+    let dest = tempdir().unwrap();
+    let src_dir = watch.path().join("mydir");
+    write_file(&src_dir.join("keep.txt"), b"source");
+    write_file(&src_dir.join("moved.txt"), b"moved");
+    // 宛先に同名ファイルを置いておく → overwrite=false なので keep.txt はスキップされる
+    write_file(&dest.path().join("mydir/keep.txt"), b"existing");
+
+    let action = make_move_action(dest.path().to_str().unwrap(), false, false, false);
+    let ctx = PlaceholderContext::new(&src_dir, watch.path(), "");
+
+    execute(&action, &src_dir, &ctx, &make_retry(0), &make_sink(), (1, 1)).await.unwrap();
+
+    assert!(src_dir.join("keep.txt").exists(), "スキップしたファイルを消してはいけない");
+    assert_eq!(std::fs::read(src_dir.join("keep.txt")).unwrap(), b"source");
+    assert_eq!(std::fs::read(dest.path().join("mydir/keep.txt")).unwrap(), b"existing");
+    // 移動できたファイルはちゃんと移っている
+    assert!(dest.path().join("mydir/moved.txt").exists());
+    assert!(!src_dir.join("moved.txt").exists());
+}
+
+// 中身が空のサブフォルダも移動先に再現される（ファイルだけ見ていると消えてしまう）。
+#[tokio::test]
+async fn empty_subdirectories_are_preserved() {
+    let watch = tempdir().unwrap();
+    let dest = tempdir().unwrap();
+    let src_dir = watch.path().join("mydir");
+    write_file(&src_dir.join("a.txt"), b"a");
+    std::fs::create_dir_all(src_dir.join("empty/nested")).unwrap();
+
+    let action = make_move_action(dest.path().to_str().unwrap(), false, false, false);
+    let ctx = PlaceholderContext::new(&src_dir, watch.path(), "");
+
+    execute(&action, &src_dir, &ctx, &make_retry(0), &make_sink(), (1, 1)).await.unwrap();
+
+    assert!(dest.path().join("mydir/empty/nested").is_dir(), "空フォルダが失われている");
+    assert!(!src_dir.exists());
+}
+
+// auto_create = false のとき、宛先フォルダが無ければ作らずにエラーにする (#68)。
+#[tokio::test]
+async fn auto_create_false_errors_when_destination_missing() {
+    let watch = tempdir().unwrap();
+    let dest_root = tempdir().unwrap();
+    let src = watch.path().join("a.txt");
+    write_file(&src, b"hello");
+
+    let missing = dest_root.path().join("not_created_yet");
+    let mut action = make_move_action(missing.to_str().unwrap(), false, false, false);
+    action.auto_create = Some(false);
+    let ctx = PlaceholderContext::new(&src, watch.path(), "");
+
+    let result = execute(&action, &src, &ctx, &make_retry(0), &make_sink(), (1, 1)).await;
+    assert!(result.is_err(), "auto_create=false なら宛先を作らずエラー");
+    assert!(!missing.exists(), "フォルダを作ってしまっている");
+    assert!(src.exists(), "元ファイルは残るべき");
+}
+
 #[tokio::test]
 async fn verify_integrity_passes_on_same_volume() {
     let watch = tempdir().unwrap();

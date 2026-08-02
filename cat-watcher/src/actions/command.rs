@@ -39,13 +39,23 @@ pub async fn execute(
     Ok(())
 }
 
+/// `shell` に指定できる値。この OS で実際に起動できるものだけを並べる。
+/// 設定バリデーション（config/validate.rs）とここで同じ一覧を使う。
+#[cfg(windows)]
+pub const VALID_SHELLS: &[&str] = &["cmd", "powershell", "pwsh"];
+#[cfg(not(windows))]
+pub const VALID_SHELLS: &[&str] = &["bash", "sh", "pwsh"];
+
 /// シェル種別から、起動するプログラムとその引数を組み立てる。
+/// 他の設定値と同じく、大文字小文字は区別しない（`cmd` / `CMD` どちらも可）。
 fn build_shell_command(shell: &str, expanded: &str) -> Result<(String, Vec<String>), AppError> {
-    match shell {
+    match shell.to_lowercase().as_str() {
+        #[cfg(windows)]
         "cmd" => Ok((
             "cmd.exe".to_string(),
             vec!["/C".to_string(), expanded.to_string()],
         )),
+        #[cfg(windows)]
         "powershell" => Ok((
             "powershell.exe".to_string(),
             vec![
@@ -80,11 +90,7 @@ fn build_shell_command(shell: &str, expanded: &str) -> Result<(String, Vec<Strin
         )),
         other => Err(AppError::Action(format!(
             "command: 不明なシェル '{other}'。{} のいずれかを指定してください",
-            if cfg!(windows) {
-                "cmd / powershell / pwsh"
-            } else {
-                "bash / sh / pwsh"
-            }
+            VALID_SHELLS.join(" / ")
         ))),
     }
 }

@@ -176,7 +176,7 @@ verify_integrity = true
 | `rules[].watch` | `path` | string | ○ | 監視対象ディレクトリパス |
 | `rules[].watch` | `recursive` | bool | ○ | サブディレクトリの再帰監視 |
 | `rules[].watch` | `target` | string | ○ | 検知対象: `file` / `directory` / `both` |
-| `rules[].watch` | `include_hidden` | bool | ○ | 隠しファイル・隠しフォルダを検知対象に含めるか。`true`: 含める / `false`: 除外。Windows の `FILE_ATTRIBUTE_HIDDEN` 属性で判定 |
+| `rules[].watch` | `include_hidden` | bool | ○ | 隠しファイル・隠しフォルダを検知対象に含めるか。`true`: 含める / `false`: 除外。Windows は `FILE_ATTRIBUTE_HIDDEN` 属性、Linux ほかはファイル名の `.` 始まりで判定 |
 | `rules[].watch` | `patterns` | string[] | ※ | glob パターン（`regex` と排他） |
 | `rules[].watch` | `exclude_patterns` | string[] | | 除外 glob パターン |
 | `rules[].watch` | `regex` | string | ※ | 正規表現（`patterns` と排他） |
@@ -191,8 +191,33 @@ verify_integrity = true
 | `rules[].actions[]` | `program` | string | execute 時 ○ | 実行ファイルの絶対パス |
 | `rules[].actions[]` | `args` | string[] | execute 時 ○ | 引数リスト |
 | `rules[].actions[]` | `working_dir` | string | | command / execute のカレントディレクトリ |
+| `rules[].actions[]` | `auto_create` | bool | | copy/move の宛先フォルダを自動作成するか。省略時は `global.toml` の `[destination] auto_create` に従う |
+| `rules[].actions[]` | `delay_ms` | 整数 | | このアクションを実行する前に待つミリ秒。省略時 0 |
 
 ※ `patterns` と `regex` はいずれか一方を必ず指定する（両方指定・両方省略はエラー）。
+
+#### グローバル設定の追加セクション
+
+| セクション | キー | 型 | 既定 | 説明 |
+|-----------|------|-----|------|------|
+| `[startup_scan]` | `enabled` | bool | `true` | 起動直後に監視フォルダを 1 度走査し、既存エントリを create として流す |
+| `[destination]` | `auto_create` | bool | `true` | copy/move の宛先フォルダを自動作成するか（全ルール共通の既定値） |
+| `[detect]` | `debounce_ms` | 整数 | `500` | 最後のイベントからこの時間静かになったら確定とみなす |
+| `[detect]` | `poll_interval_ms` | 整数 | `100` | 確定済みを確認する間隔。1 以上必須（0 はバリデーションエラー） |
+| `[service]` | `run_as_logged_in_user` | bool | `true` | サービス起動時、外部プロセスをログオンユーザー権限で実行するか |
+
+#### `auto_create` とロード時バリデーションの関係
+
+実行時は宛先フォルダを `create_dir_all` で自動作成するため、ロード時の存在チェックは
+`auto_create` に合わせて強さを変える。
+
+| `auto_create` | ロード時のチェック | 実行時の挙動 |
+|---|---|---|
+| `true`（既定） | 静的部分の先祖をたどって**1 つも実在しない場合のみ**エラー（未接続のドライブレター・綴り違いの共有名を検出） | 無ければ再帰的に作成 |
+| `false` | 静的部分が実在するディレクトリであることを必須にする | 無ければアクション失敗 |
+
+`destination` が `{WatchPath}/out` のように先頭からプレースホルダーで始まる場合は、
+静的部分が無いためロード時の判定をスキップする。
 
 #### `target` × `recursive` の挙動
 
@@ -776,6 +801,8 @@ JSON 構造化ログ。1 行 1 JSON オブジェクト。
 - `include_hidden = false` の場合、イベント受信後に `GetFileAttributesW` でファイル属性を確認し、`FILE_ATTRIBUTE_HIDDEN` が付与されたファイル・フォルダを除外する
 - `include_hidden = true` の場合はフィルタリングせず、OS から通知された全イベントを処理する
 - Windows がエクスプローラー操作時に自動生成する `desktop.ini`、`Thumbs.db` 等は隠し属性を持つため、`include_hidden = false` で自動的に除外される
+- **Linux ほか**では隠し属性という概念が無いため、ファイル名が `.` で始まるか（ドットファイル慣習）で判定する
+- Windows では `.env` のようなドット始まりのファイルでも隠し属性が無ければ除外されない。名前で除外したい場合は `exclude_regex = "^\\."` を使う
 
 #### 属性判定の詳細ルール
 

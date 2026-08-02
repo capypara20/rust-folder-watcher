@@ -7,14 +7,16 @@
 //!
 //! 設計方針:
 //! - **取りこぼし許容**（broadcast）。UI が詰まっても監視・アクションは遅延させない。
-//! - ルートは GET 3 本（`/`・`/events`・`/search`）のみ。薄い自前 HTTP 実装で完結。
+//! - ルートは GET のみ（`/`・`/events`・`/search`・`/assets/*`）。薄い自前 HTTP 実装で完結。
 //! - 既定は localhost 束縛。ログにパスが出るため外部公開は呼び出し側の責任。
 //!
 //! 構成:
 //! - [`event`]  配信イベント [`DashEvent`] とログエントリからの変換。
 //! - [`server`] HTTP/SSE サーバ本体（接続受理・ルーティング）。
 //! - [`search`] 保存済みログファイルの横断検索。
+//! - [`assets`] 画面の HTML / CSS / JS（`assets/` 配下のファイルを埋め込み）。
 
+mod assets;
 mod event;
 mod search;
 mod server;

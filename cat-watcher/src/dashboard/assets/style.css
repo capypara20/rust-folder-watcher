@@ -1,0 +1,307 @@
+/* ============================================================
+   cat-watcher dashboard — スタイル
+
+   構成:
+     1. デザイントークン（色・寸法）
+     2. 土台（body / スクロール構造）
+     3. ヘッダー・ツールバー
+     4. ログテーブル（列定義はここ 1 か所）
+     5. セル内の表現（バッジ / パス / ハイライト）
+     6. 過去ログ表示
+     7. 画面幅が狭いとき
+   ============================================================ */
+
+/* ---- 1. デザイントークン -------------------------------- */
+:root {
+  --bg:        #0e1116;
+  --bg-alt:    #11161d;   /* 縞模様の濃い方 */
+  --panel:     #161b22;
+  --panel-2:   #1b2230;
+  --border:    #2a3038;
+  --border-soft: rgba(255, 255, 255, .05);
+  --fg:        #d6deeb;
+  --muted:     #7a8696;
+  --accent:    #4aa3ff;
+
+  --system: #6b7686;
+  --detect: #2ea043;
+  --action: #4aa3ff;
+
+  --info:  #58a6ff;
+  --warn:  #d29922;
+  --error: #f85149;
+  --match: #3fb950;
+  --ok:    #3fb950;
+  --note:  #8b949e;
+  --block: #39c5bb;
+
+  --mark:     #ffd33d;
+  --mark-cur: #ff9d3d;
+
+  /* テーブルの列幅。ヘッダーと本文が必ず同じ定義を使う */
+  --cols: 78px 62px 58px 132px minmax(160px, 1.1fr) minmax(220px, 2fr);
+  --row-pad-x: 14px;
+  --radius: 6px;
+}
+
+/* ---- 2. 土台 -------------------------------------------- */
+* { box-sizing: border-box; }
+html, body { height: 100%; margin: 0; }
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, "DejaVu Sans Mono", monospace;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---- 3. ヘッダー・ツールバー ----------------------------- */
+.topbar {
+  display: flex; align-items: center; gap: 14px;
+  padding: 9px var(--row-pad-x);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.brand { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+.brand .mark { font-size: 15px; }
+.brand .name { font-size: 15px; font-weight: 700; color: var(--accent); letter-spacing: .2px; }
+.brand .sub  { font-size: 12px; color: var(--muted); }
+
+.status { display: flex; align-items: center; gap: 6px; color: var(--muted); white-space: nowrap; font-size: 12px; }
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--muted); flex: none; }
+.dot.live { background: var(--match); box-shadow: 0 0 6px var(--match); }
+.dot.down { background: var(--error); box-shadow: 0 0 6px var(--error); }
+
+.spacer { flex: 1; }
+
+.stats { display: flex; align-items: baseline; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.stats b { color: var(--fg); font-size: 13px; font-variant-numeric: tabular-nums; }
+.stats .unit { margin-left: 3px; }
+.stats .sep { opacity: .5; }
+
+.toolbar {
+  display: flex; align-items: center; gap: 10px 16px; flex-wrap: wrap;
+  padding: 8px var(--row-pad-x);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.group.grow { flex: 1; min-width: 320px; }
+
+label.ck {
+  display: inline-flex; align-items: center; gap: 5px;
+  cursor: pointer; user-select: none; font-size: 12px; color: var(--muted);
+}
+label.ck:hover { color: var(--fg); }
+
+.searchbox {
+  display: flex; align-items: center; gap: 4px; flex: 1; min-width: 220px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0 6px;
+}
+.searchbox:focus-within { border-color: var(--accent); }
+.searchbox.invalid { border-color: var(--error); }
+.searchbox .ico { color: var(--muted); font-size: 12px; }
+.searchbox input {
+  flex: 1; min-width: 0; background: none; border: 0; color: var(--fg);
+  font: inherit; padding: 6px 2px;
+}
+.searchbox input:focus { outline: none; }
+
+button {
+  background: var(--bg); border: 1px solid var(--border); color: var(--fg);
+  border-radius: var(--radius); padding: 5px 10px; cursor: pointer;
+  font: inherit; white-space: nowrap;
+}
+button:hover { border-color: var(--accent); }
+button.on { border-color: var(--accent); color: var(--accent); }
+button:disabled { opacity: .4; cursor: default; border-color: var(--border); color: var(--muted); }
+button.icon { padding: 5px 9px; }
+button.tog { padding: 2px 6px; font-size: 11px; border-color: transparent; color: var(--muted); }
+button.tog:hover { color: var(--fg); }
+button.tog.on { color: var(--accent); border-color: var(--accent); }
+
+.matchinfo {
+  color: var(--muted); font-size: 12px; min-width: 54px; text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+
+.chip { padding: 1px 7px; border-radius: 999px; font-size: 11px; font-weight: 600; }
+
+#banner {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px var(--row-pad-x);
+  background: var(--panel-2); border-bottom: 1px solid var(--border);
+  flex: none;
+}
+#banner .ttl { font-weight: 600; }
+
+/* ---- 4. ログテーブル ------------------------------------- */
+.table { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+.thead {
+  display: grid;
+  grid-template-columns: var(--cols);
+  gap: 10px;
+  padding: 5px var(--row-pad-x);
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 11px; font-weight: 600; letter-spacing: .4px;
+  flex: none;
+}
+.th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.tbody { flex: 1; overflow-y: auto; overflow-x: hidden; }
+
+.row {
+  display: grid;
+  grid-template-columns: var(--cols);
+  gap: 10px;
+  padding: 3px var(--row-pad-x);
+  align-items: baseline;
+  border-bottom: 1px solid var(--border-soft);
+  border-left: 3px solid transparent;
+  padding-left: calc(var(--row-pad-x) - 3px);
+}
+.row:nth-child(even) { background: var(--bg-alt); }
+.row:hover { background: rgba(255, 255, 255, .05); }
+.row.detect { border-left-color: var(--detect); }
+.row.action { border-left-color: rgba(74, 163, 255, .35); }
+.row.flash { animation: flash 1.1s ease-out; }
+@keyframes flash {
+  0%   { background: rgba(63, 185, 80, .35); }
+  100% { background: transparent; }
+}
+
+/* 日付が変わったところに挟む区切り。時刻列から日付を消せるので 1 行が軽くなる */
+.daysep {
+  position: sticky; top: 0; z-index: 1;
+  padding: 3px var(--row-pad-x);
+  background: var(--panel-2);
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+  color: var(--muted); font-size: 11px; letter-spacing: .5px;
+}
+
+/* ---- 4b. 検知グループ（detect をクリックで開閉）------------ */
+/* 検知 1 件 = 1 グループ。畳んでおくと「マッチしたファイルの一覧」になり、
+   開くとその検知に紐づく action 行が出る。 */
+.grp { border-bottom: 1px solid var(--border-soft); }
+.grp .grp-head { cursor: pointer; border-bottom: 0; user-select: none; }
+.grp .grp-head:hover { background: rgba(74, 163, 255, .10); }
+.grp.open > .grp-head { background: rgba(74, 163, 255, .07); }
+
+/* 開閉の三角。時刻列の内側に置くので、列の幅は変えない */
+.twisty {
+  position: absolute; left: 3px;
+  color: var(--muted); font-size: 9px; line-height: 1.9;
+}
+.grp .grp-head { position: relative; }
+.grp .grp-head:hover .twisty { color: var(--accent); }
+
+/* 見出しの集計。畳んだままでも失敗の有無が分かるよう「内容」列の右端に寄せる */
+.grp .grp-head .c-body { display: flex; gap: 10px; align-items: baseline; min-width: 0; }
+.grp-summary {
+  display: flex; gap: 8px; align-items: baseline;
+  margin-left: auto; flex: none; white-space: nowrap;
+}
+.grp-count { color: var(--muted); font-size: 11px; }
+.grp-none  { color: var(--muted); font-size: 11px; opacity: .7; }
+.grp-tally { font-size: 11px; font-weight: 600; }
+
+.grp-children { display: none; }
+.grp.open > .grp-children { display: block; }
+.grp-children .row {
+  background: rgba(0, 0, 0, .22);
+  border-left-color: rgba(74, 163, 255, .35);
+  padding-left: calc(var(--row-pad-x) + 13px);
+}
+.grp-children .row:hover { background: rgba(255, 255, 255, .05); }
+/* グループ内では detect 行の緑線を引き継がない */
+.grp-children .row.detect { border-left-color: rgba(74, 163, 255, .35); }
+
+/* 失敗を含むグループは畳んでいても目立たせる */
+.grp.has-error > .grp-head { border-left-color: var(--error); }
+
+/* 既定は 1 行に収める。「折り返し」ボタンで解除する */
+.c-rule, .c-path, .c-body { overflow: hidden; }
+.tbody:not(.wrap) .c-rule,
+.tbody:not(.wrap) .c-path,
+.tbody:not(.wrap) .c-body { white-space: nowrap; text-overflow: ellipsis; }
+.tbody.wrap .c-body,
+.tbody.wrap .c-path { white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.empty { color: var(--muted); text-align: center; padding: 48px 16px; }
+
+/* ---- 5. セル内の表現 ------------------------------------- */
+.c-time { color: var(--muted); font-variant-numeric: tabular-nums; }
+.c-rule { color: var(--accent); }
+
+.badge {
+  display: block; text-align: center; border-radius: 5px;
+  padding: 0 4px; font-size: 11px; font-weight: 600;
+}
+.k-system { background: rgba(107, 118, 134, .18); color: var(--system); }
+.k-detect { background: rgba(46, 160, 67, .16);   color: var(--detect); }
+.k-action { background: rgba(74, 163, 255, .16);  color: var(--action); }
+
+.lv { font-size: 11px; font-weight: 600; }
+.lv-info  { color: var(--info); }
+.lv-warn  { color: var(--warn); }
+.lv-error { color: var(--error); }
+.lv-match { color: var(--match); }
+.lv-ok    { color: var(--ok); }
+.lv-note  { color: var(--note); }
+.lv-block { color: var(--block); }
+.lv-action{ color: var(--action); }
+
+/* パスは「親フォルダを削り、ファイル名は必ず見せる」。
+   長いパスでも一番知りたい部分が消えないようにするため。 */
+.path { display: flex; min-width: 0; }
+.path .dir  { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.path .base { flex: none; color: var(--fg); }
+.tbody.wrap .path { display: inline; }
+.tbody.wrap .path .dir { overflow: visible; white-space: pre-wrap; }
+
+.events { color: var(--warn); }
+
+mark { background: var(--mark); color: #1a1a1a; border-radius: 2px; padding: 0 1px; }
+mark.current { background: var(--mark-cur); outline: 1px solid rgba(255, 255, 255, .4); }
+
+/* ---- 6. 過去ログ表示 ------------------------------------- */
+/* 列の意味が違うので、専用のグリッドにする */
+.table.history { --cols: 62px minmax(140px, 1fr) minmax(280px, 3fr); }
+.hrow {
+  display: grid;
+  grid-template-columns: var(--cols);
+  gap: 10px;
+  padding: 3px var(--row-pad-x);
+  align-items: baseline;
+  border-bottom: 1px solid var(--border-soft);
+}
+.hrow:nth-child(even) { background: var(--bg-alt); }
+.hrow:hover { background: rgba(255, 255, 255, .05); }
+.hfile { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hline { overflow-wrap: anywhere; white-space: pre-wrap; }
+
+/* ---- 7. 画面幅が狭いとき --------------------------------- */
+/* 6 列は横に並べきれないので、1 件 = 2 段のカード表示へ切り替える */
+@media (max-width: 860px) {
+  .thead { display: none; }
+  .row, .hrow {
+    grid-template-columns: 66px 58px minmax(0, 1fr);
+    row-gap: 2px;
+    padding-top: 6px; padding-bottom: 6px;
+  }
+  .row .c-rule { grid-column: 3; }
+  .row .c-path { grid-column: 1 / -1; }
+  .row .c-body { grid-column: 1 / -1; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .row .c-level { grid-column: 2; }
+  .hrow .hline { grid-column: 1 / -1; }
+  .group.grow { min-width: 0; }
+}

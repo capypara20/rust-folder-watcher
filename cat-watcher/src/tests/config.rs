@@ -19,12 +19,23 @@ fn validate_action(action: &ActionConfig, rule_name: &str) -> Result<(), AppErro
 // テンプレートに埋め込む
 // =========================================================
 
-const CMD_ACTION: &str = r#"
+/// テストで使うシェル名。`shell` はロード時に「この OS で起動できる値か」を
+/// 検証するようになったため、Windows と Linux で使い分ける必要がある。
+#[cfg(windows)]
+const TEST_SHELL: &str = "cmd";
+#[cfg(not(windows))]
+const TEST_SHELL: &str = "bash";
+
+fn cmd_action() -> String {
+	format!(
+		r#"
 	type = "command"
-	shell = "cmd"
+	shell = "{TEST_SHELL}"
 	command = "echo hi"
 	working_dir = ""
-"#;
+"#
+	)
+}
 
 fn rule_toml(name: &str, watch_path: &str, events: &str, action_block: &str) -> String {
 	let watch_path = watch_path.replace('\\', "/");
@@ -202,6 +213,8 @@ fn make_global(dir: &str, file_name: &str) -> GlobalConfig {
 		},
 		dashboard: None,
 		startup_scan: None,
+		destination: None,
+		detect: None,
 		service: None,
 	}
 }
@@ -339,7 +352,7 @@ fn test_parse_rules_config_action_types() {
 		working_dir = ""
 	"#.to_string();
 
-	for block in [copy_move("copy"), copy_move("move"), CMD_ACTION.to_string(), execute_block] {
+	for block in [copy_move("copy"), copy_move("move"), cmd_action(), execute_block] {
 		let config: RulesConfig = toml::from_str(&make_rules_toml(&watch_path, &block)).unwrap();
 		assert_eq!(config.rules.len(), 1, "block: {block}");
 		assert_eq!(config.rules[0].name, "test-rule");
@@ -391,9 +404,9 @@ fn test_validate_rules_structural_errors() {
 	let dir = tempdir().unwrap();
 	let path = sanitize_path(dir.path());
 	let bad = [
-		("空の name", rule_toml("  ", &path, r#""create""#, CMD_ACTION)),
-		("空の events", rule_toml("no-events", &path, "", CMD_ACTION)),
-		("実在しない watch.path", rule_toml("no-path", "C:/nonexistent_path_xyz_12345", r#""create""#, CMD_ACTION)),
+		("空の name", rule_toml("  ", &path, r#""create""#, &cmd_action())),
+		("空の events", rule_toml("no-events", &path, "", &cmd_action())),
+		("実在しない watch.path", rule_toml("no-path", "/nonexistent_path_xyz_12345/deeper", r#""create""#, &cmd_action())),
 	];
 	for (label, toml_str) in &bad {
 		assert!(validate_toml(toml_str).is_err(), "{label} はエラーになるべき");
@@ -471,8 +484,8 @@ fn test_validate_watch_filters() {
 			{filters}
 
 			[[rules.actions]]
-			{CMD_ACTION}
-		"#);
+			{action}
+		"#, action = cmd_action());
 		assert_eq!(
 			validate_toml(&toml_str).is_ok(),
 			*expect_ok,
@@ -518,7 +531,7 @@ fn test_validate_action_copy_move_required_fields() {
 #[test]
 fn test_validate_action_command_required_fields() {
 	let mut valid = base_action(ActionType::Command);
-	valid.shell = Some("cmd".to_string());
+	valid.shell = Some(TEST_SHELL.to_string());
 	valid.command = Some("echo hello".to_string());
 	valid.working_dir = Some("".to_string());
 	assert!(validate_action(&valid, "test").is_ok());
@@ -559,20 +572,67 @@ fn test_validate_action_execute_required_fields() {
 // validate_action: destination の実在チェックとプレースホルダー
 // =========================================================
 
-#[test]
-fn test_validate_action_destination_existence() {
-	// 実在しない destination はエラー
-	let a = copy_like_action(ActionType::Copy, "C:/nonexistent_dest_xyz_99999");
-	assert!(validate_action(&a, "test").is_err());
+/// テスト用に auto_create を明示した copy アクションを作る。
+fn copy_action_with_auto_create(dest: &str, auto_create: bool) -> ActionConfig {
+	let mut a = copy_like_action(ActionType::Copy, dest);
+	a.auto_create = Some(auto_create);
+	a
+}
 
-	// destination 中の {Date} 以降はランタイム展開されるため、ルートだけ実在すれば OK
-	let dest_root = tempdir().unwrap();
-	let with_placeholder = format!("{}/{{Date}}/sub", sanitize_path(dest_root.path()));
-	let a = copy_like_action(ActionType::Copy, &with_placeholder);
+// auto_create = true（既定）: 宛先フォルダが無いだけならロードを通す (#68)。
+// 実行時に create_dir_all で掘られるため、事前に手で作らせる必要はない。
+#[test]
+fn test_destination_missing_dir_is_allowed_when_auto_create() {
+	let existing_root = tempdir().unwrap();
+	let root = sanitize_path(existing_root.path());
+
+	// 固定パス（プレースホルダーなし）でも、まだ存在しないだけなら OK
+	let a = copy_action_with_auto_create(&format!("{root}/not_yet/deeper"), true);
 	assert!(validate_action(&a, "test").is_ok());
 
-	// プレースホルダー前のルートが存在しなければエラー
-	let a = copy_like_action(ActionType::Copy, "C:/nonexistent_root_zzz_99999/{Date}");
+	// プレースホルダーありも同様
+	let a = copy_action_with_auto_create(&format!("{root}/{{Date}}/sub"), true);
+	assert!(validate_action(&a, "test").is_ok());
+
+	// 先頭からプレースホルダーで始まる場合は静的部分が無いので判定しない
+	let a = copy_action_with_auto_create("{WatchPath}/archive", true);
+	assert!(validate_action(&a, "test").is_ok());
+}
+
+// auto_create = true でも、先祖をたどって 1 つも実在しない宛先はエラー。
+// 未接続のドライブレターや綴り間違いの共有名を拾うための最低限のチェック。
+#[cfg(windows)]
+#[test]
+fn test_destination_without_existing_drive_is_error() {
+	let a = copy_action_with_auto_create(r"Q:\backup\{Date}", true);
+	assert!(validate_action(&a, "test").is_err());
+}
+
+// Unix では絶対パスの根（`/`）が必ず実在するため、このチェックは発火しない。
+// 実行時に create_dir_all で作られるので、ロードは通してよい。
+// （このチェックが意味を持つのは、根そのものが存在しないことがある
+//   Windows のドライブレターや UNC 共有）
+#[cfg(not(windows))]
+#[test]
+fn test_destination_absolute_path_passes_on_unix() {
+	let a = copy_action_with_auto_create("/nonexistent_root_zzz_99999/backup/{Date}", true);
+	assert!(validate_action(&a, "test").is_ok());
+}
+
+// auto_create = false: 従来どおり静的部分の実在を要求する。
+#[test]
+fn test_destination_existence_required_when_auto_create_disabled() {
+	let dest_root = tempdir().unwrap();
+	let root = sanitize_path(dest_root.path());
+
+	// 実在するフォルダなら OK
+	assert!(validate_action(&copy_action_with_auto_create(&root, false), "test").is_ok());
+	// {Date} の親が実在すれば OK
+	let a = copy_action_with_auto_create(&format!("{root}/{{Date}}/sub"), false);
+	assert!(validate_action(&a, "test").is_ok());
+
+	// まだ存在しない固定パスはエラー
+	let a = copy_action_with_auto_create(&format!("{root}/not_yet"), false);
 	assert!(validate_action(&a, "test").is_err());
 }
 
@@ -631,7 +691,7 @@ fn test_validate_rules_config_multiple_rules() {
 
 		[[rules.actions]]
 		type = "command"
-		shell = "cmd"
+		shell = "{TEST_SHELL}"
 		command = "echo done"
 		working_dir = ""
 	"#);

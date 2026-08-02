@@ -33,6 +33,59 @@ async fn copies_single_file_flat() {
     assert_eq!(result, Some(dest_file));
 }
 
+// 中身が空のサブフォルダもコピー先に再現される。
+#[tokio::test]
+async fn empty_subdirectories_are_copied() {
+    let watch = tempdir().unwrap();
+    let dest = tempdir().unwrap();
+    let src_dir = watch.path().join("mydir");
+    write_file(&src_dir.join("a.txt"), b"a");
+    std::fs::create_dir_all(src_dir.join("empty/nested")).unwrap();
+
+    let action = make_copy_action(dest.path().to_str().unwrap(), false, false, false);
+    let ctx = PlaceholderContext::new(&src_dir, watch.path(), "");
+
+    execute(&action, &src_dir, &ctx, &make_retry(0), &make_sink(), (1, 1)).await.unwrap();
+
+    assert!(dest.path().join("mydir/a.txt").exists());
+    assert!(dest.path().join("mydir/empty/nested").is_dir(), "空フォルダがコピーされていない");
+}
+
+// auto_create = false のとき、コピー先フォルダが無ければ作らずエラーにする (#68)。
+#[tokio::test]
+async fn auto_create_false_errors_when_destination_missing() {
+    let watch = tempdir().unwrap();
+    let dest_root = tempdir().unwrap();
+    let src = watch.path().join("a.txt");
+    write_file(&src, b"hello");
+
+    let missing = dest_root.path().join("not_created_yet");
+    let mut action = make_copy_action(missing.to_str().unwrap(), false, false, false);
+    action.auto_create = Some(false);
+    let ctx = PlaceholderContext::new(&src, watch.path(), "");
+
+    let result = execute(&action, &src, &ctx, &make_retry(0), &make_sink(), (1, 1)).await;
+    assert!(result.is_err());
+    assert!(!missing.exists(), "フォルダを作ってしまっている");
+}
+
+// auto_create = true（既定）なら、深い宛先でも自動で掘ってコピーできる。
+#[tokio::test]
+async fn auto_create_true_makes_missing_destination() {
+    let watch = tempdir().unwrap();
+    let dest_root = tempdir().unwrap();
+    let src = watch.path().join("a.txt");
+    write_file(&src, b"hello");
+
+    let missing = dest_root.path().join("deep/er/est");
+    let mut action = make_copy_action(missing.to_str().unwrap(), false, false, false);
+    action.auto_create = Some(true);
+    let ctx = PlaceholderContext::new(&src, watch.path(), "");
+
+    execute(&action, &src, &ctx, &make_retry(0), &make_sink(), (1, 1)).await.unwrap();
+    assert!(missing.join("a.txt").exists());
+}
+
 #[tokio::test]
 async fn preserves_subdir_structure() {
     let watch = tempdir().unwrap();
