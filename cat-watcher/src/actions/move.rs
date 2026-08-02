@@ -181,6 +181,13 @@ async fn move_directory_recursive(
         ))
     })?;
 
+    // フォルダ単位の完了もログに残す。中身が空だとファイル 1 件ごとの
+    // 行が 1 本も出ず、何も起きなかったように見えてしまうため。
+    sink.ok(step.0, step.1, format!(
+        "フォルダの移動完了: {} → {}（ファイル {} 件・サブフォルダ {} 件）",
+        src_dir.display(), folder_dest.display(), files.len(), dirs.len()
+    ));
+
     Ok(Some(folder_dest))
 }
 

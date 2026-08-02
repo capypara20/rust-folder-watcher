@@ -115,11 +115,21 @@ async fn copy_directory_recursive(
         ensure_dest_dir(&folder_dest.join(rel), opts.auto_create, LABEL).await?;
     }
 
+    let mut copied = 0usize;
     for entry in &files {
         let rel = relative_to(entry, src_dir)?;
         let entry_dest = folder_dest.join(rel);
-        copy_one_file(entry, &entry_dest, opts, retry, sink, step).await?;
+        if copy_one_file(entry, &entry_dest, opts, retry, sink, step).await?.is_some() {
+            copied += 1;
+        }
     }
+
+    // フォルダ単位の完了もログに残す。中身が空だとファイル 1 件ごとの
+    // 行が 1 本も出ず、何も起きなかったように見えてしまうため。
+    sink.ok(step.0, step.1, format!(
+        "フォルダのコピー完了: {} → {}（ファイル {}/{} 件・サブフォルダ {} 件）",
+        src_dir.display(), folder_dest.display(), copied, files.len(), dirs.len()
+    ));
 
     Ok(Some(folder_dest))
 }
