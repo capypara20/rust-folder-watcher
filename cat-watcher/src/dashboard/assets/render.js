@@ -63,6 +63,9 @@ export function buildRow(ev) {
   if (ev.path) {
     appendPath(pathCell, ev.path);
     pathCell.title = ev.path;
+  } else {
+    // 対象が無い行は対象列を内容へ明け渡す（style.css の .row.nopath）
+    row.classList.add("nopath");
   }
   row.appendChild(pathCell);
 

@@ -38,8 +38,12 @@
   --mark:     #ffd33d;
   --mark-cur: #ff9d3d;
 
-  /* テーブルの列幅。ヘッダーと本文が必ず同じ定義を使う */
-  --cols: 78px 62px 58px 132px minmax(160px, 1.1fr) minmax(220px, 2fr);
+  /* テーブルの列幅。ヘッダーと本文が必ず同じ定義を使う。
+     時刻 / 種別 / レベルは中身の最大幅（"23:18:02" / バッジ / "action"）に
+     合わせた固定幅。余らせても他の列が使えないので、実測値ぶんだけ渡す。
+     ルールは日本語のルール名が 13 文字程度まで入るように広げつつ、
+     窓が狭いときは 140px まで縮めて対象・内容へ譲る。 */
+  --cols: 70px 56px 48px minmax(140px, 180px) minmax(160px, 1.1fr) minmax(220px, 2fr);
   --row-pad-x: 14px;
   --radius: 6px;
 }
@@ -228,6 +232,12 @@ button.tog.on { color: var(--accent); border-color: var(--accent); }
 /* 失敗を含むグループは畳んでいても目立たせる */
 .grp.has-error > .grp-head { border-left-color: var(--error); }
 
+/* 対象を持たない行（アクションの結果行・システムログ）は、対象列がまるごと
+   空いているのに隣で内容が見切れる。空いている対象列まで内容を伸ばす。
+   検知行はここに入らないので、一覧としての列の並びは崩れない。 */
+.row.nopath .c-path { display: none; }
+.row.nopath .c-body { grid-column: 5 / -1; }
+
 /* 既定は 1 行に収める。「折り返し」ボタンで解除する */
 .c-rule, .c-path, .c-body { overflow: hidden; }
 .tbody:not(.wrap) .c-rule,
@@ -300,7 +310,9 @@ mark.current { background: var(--mark-cur); outline: 1px solid rgba(255, 255, 25
   }
   .row .c-rule { grid-column: 3; }
   .row .c-path { grid-column: 1 / -1; }
-  .row .c-body { grid-column: 1 / -1; white-space: pre-wrap; overflow-wrap: anywhere; }
+  /* 3 列しか無いので、広い画面用の「5 列目から」は効かせない */
+  .row .c-body,
+  .row.nopath .c-body { grid-column: 1 / -1; white-space: pre-wrap; overflow-wrap: anywhere; }
   .row .c-level { grid-column: 2; }
   .hrow .hline { grid-column: 1 / -1; }
   .group.grow { min-width: 0; }
