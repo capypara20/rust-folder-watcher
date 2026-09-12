@@ -134,11 +134,6 @@ verify_integrity   = true
 # working_dir = ""
 "#;
 
-pub const RULES_CSV: &str = "\
-rule_name,enabled,watch_path,recursive,target,include_hidden,patterns,regex,exclude_patterns,events,action_type,destination,overwrite,preserve_structure,verify_integrity,shell,command,program,args,working_dir,exclude_regex,dir_patterns,dir_regex,exclude_dir_patterns,exclude_dir_regex,auto_create,delay_ms\r\n\
-ルール名,true,C:\\監視フォルダ,true,file,false,*.csv,,,create,copy,D:\\backup\\{Date},false,true,true,,,,,,,,,,,,\r\n\
-";
-
 #[cfg(test)]
 #[path = "tests/templates.rs"]
 mod tests;

@@ -14,12 +14,11 @@
 2. [動作環境](#2-動作環境)
 3. [ファイル構成](#3-ファイル構成)
 4. [設定ファイルの書き方](#4-設定ファイルの書き方)
-5. [CSV からの設定生成（csv2toml）](#5-csv-からの設定生成csv2toml)
-6. [アプリケーションの起動と停止](#6-アプリケーションの起動と停止)
-7. [プレースホルダリファレンス](#7-プレースホルダリファレンス)
-8. [ログの見方](#8-ログの見方)
-9. [設定例集](#9-設定例集)
-10. [トラブルシューティング](#10-トラブルシューティング)
+5. [アプリケーションの起動と停止](#5-アプリケーションの起動と停止)
+6. [プレースホルダリファレンス](#6-プレースホルダリファレンス)
+7. [ログの見方](#7-ログの見方)
+8. [設定例集](#8-設定例集)
+9. [トラブルシューティング](#9-トラブルシューティング)
 
 ---
 
@@ -27,14 +26,14 @@
 
 本アプリケーション（`watcher.exe`）は、指定したフォルダをリアルタイムに監視し、ファイルやフォルダの作成・変更・削除・リネームを検知して、あらかじめ定義されたアクション（コピー・移動・コマンド実行・外部プロセス起動）を自動実行するツールです。
 
-補助ツールとして、Excel（CSV）で管理するルール定義を TOML 設定ファイルに変換する `csv2toml.exe` を提供します。
-
 ### 運用フロー
 
 ```
-[Excel で CSV 編集] → csv2toml.exe → rules.toml
-                                          ↓
-[global.toml を手動編集]  ───────→  watcher.exe で監視開始
+[rules.toml を編集]  ───┐
+                        ├──→  cat-watcher で監視開始
+[global.toml を編集] ───┘
+
+雛形は `cat-watcher --init global rules` で生成できます。
 ```
 
 ---
@@ -55,11 +54,9 @@
 
 ```
 watcher.exe          # 監視アプリケーション本体
-csv2toml.exe         # CSV→TOML 変換ツール
 config/
   global.toml        # グローバル設定
   rules.toml         # 監視ルール定義
-  rules.csv          # ルール定義の CSV（Excel で管理）
 logs/
   watcher.log        # ログ出力先（自動生成）
 ```
@@ -95,7 +92,7 @@ dry_run = false                 # true にするとアクションを実行せ�
 
 ### 4.2 rules.toml（監視ルール定義）
 
-通常は `csv2toml.exe` で CSV から生成します。手動編集も可能です。
+`cat-watcher --init rules` で雛形を生成し、手動で編集します。
 
 ```toml
 [[rules]]
@@ -198,74 +195,7 @@ command = "echo Backed up: {Name} >> C:/data/backup.log"
 
 ---
 
-## 5. CSV からの設定生成（csv2toml）
-
-### 5.1 基本的な使い方
-
-```powershell
-csv2toml.exe --input config/rules.csv --output config/rules.toml
-```
-
-### 5.2 オプション
-
-| オプション | 説明 |
-|-----------|------|
-| `--input <path>` / `-i` | 入力 CSV ファイルパス（必須） |
-| `--output <path>` / `-o` | 出力 TOML ファイルパス（必須） |
-| `--validate` | バリデーションのみ実行（ファイル出力なし） |
-| `--dry-run` | 変換結果を画面に出力（ファイル出力なし） |
-| `--version` / `-V` | バージョン表示 |
-| `--help` / `-h` | ヘルプ表示 |
-
-### 5.3 CSV フォーマット
-
-CSV は **BOM 付き UTF-8** で保存してください（Excel で「CSV UTF-8」として保存すると BOM 付きになります）。
-
-列の順番は自由です。ヘッダ名で列を識別します。
-
-| 列名 | 説明 | 例 |
-|------|------|-----|
-| `name` | ルール名 | `csv-backup` |
-| `enabled` | 有効/無効 | `true` |
-| `watch_path` | 監視パス | `C:/data/incoming` |
-| `recursive` | 再帰監視 | `true` |
-| `target` | 検知対象 | `file` |
-| `include_hidden` | 隠しファイルを含めるか | `false` |
-| `patterns` | glob パターン（`\|` 区切り） | `*.csv\|*.xlsx` |
-| `exclude_patterns` | 除外パターン（`\|` 区切り） | `*.tmp\|*.bak` |
-| `regex` | 正規表現（patterns と排他） | `^\d{8}\.csv$` |
-| `events` | イベント（`\|` 区切り） | `create\|modify` |
-| `action_type` | アクション種別 | `copy` |
-| `action_destination` | コピー/移動先 | `C:/data/backup` |
-| `action_overwrite` | 上書き | `false` |
-| `action_preserve_structure` | 構造維持 | `true` |
-| `action_verify_integrity` | BLAKE3 ハッシュ検証 | `true` |
-| `action_shell` | シェル種別 | `powershell` |
-| `action_command` | コマンド | `Write-Host '{Name}'` |
-| `action_program` | 実行ファイル | `C:/tools/proc.exe` |
-| `action_args` | 引数（`\|` 区切り） | `--input\|{FullName}` |
-| `action_working_dir` | 作業ディレクトリ | `C:/tools` |
-
-#### アクションチェーンの CSV 表現
-
-同じ `name` の行を複数書くと、アクションチェーンとして統合されます（上の行から順に実行）。
-
-```csv
-name,enabled,watch_path,recursive,target,patterns,...,action_type,action_destination,...
-csv-backup,true,C:/data/incoming,true,file,*.csv,...,copy,C:/data/backup,...
-csv-backup,true,C:/data/incoming,true,file,*.csv,...,command,,,...
-```
-
-> **重要**: 同じ `name` の行では `watch_path` 等の監視設定を完全に一致させてください。不一致の場合はエラーになります。
-
-### 5.4 CSV 内の空白の扱い
-
-- 値の前後の空白はトリムされます（`  C:/data  ` → `C:/data`）
-- ダブルクォート内の空白は保持されます（`"C:/My Data"` → `C:/My Data`）
-
----
-
-## 6. アプリケーションの起動と停止
+## 5. アプリケーションの起動と停止
 
 ### 6.1 起動
 
@@ -322,7 +252,7 @@ watcher.exe --global config/global.toml --rules config/rules.toml --validate
 
 ---
 
-## 7. プレースホルダリファレンス
+## 6. プレースホルダリファレンス
 
 `command` や `execute` のコマンド文字列、引数にプレースホルダを使用できます。
 
@@ -381,7 +311,7 @@ command = "echo {{result}}: {Name}"
 
 ---
 
-## 8. ログの見方
+## 7. ログの見方
 
 ### 8.1 ログ形式
 
@@ -426,7 +356,7 @@ command = "echo {{result}}: {Name}"
 
 ---
 
-## 9. 設定例集
+## 8. 設定例集
 
 ### 9.1 CSV ファイルを検知してバックアップコピー
 
@@ -555,7 +485,7 @@ verify_integrity = false
 
 ---
 
-## 10. トラブルシューティング
+## 9. トラブルシューティング
 
 ### 10.1 起動時にエラーが出る
 

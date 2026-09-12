@@ -9,7 +9,6 @@ use crate::error::AppError;
 
 mod actions;
 mod config;
-mod csv_import;
 #[cfg(feature = "dashboard")]
 mod dashboard;
 mod error;
@@ -38,10 +37,6 @@ const AFTER_LONG_HELP: &str = "\
 
   テンプレート生成（複数同時指定可）:
     cat-watcher --init global rules        # global.toml と rules.toml を同時生成
-    cat-watcher --init global rules csv
-
-  CSV から rules.toml を生成:
-    cat-watcher --from-csv rules.csv --output rules.toml
 
 \x1b[33;1m▶ プレースホルダー\x1b[0m  \x1b[2m（rules.toml の destination / command / args などで使用可）\x1b[0m
   \x1b[32m{FullName}\x1b[0m         ファイルのフルパス
@@ -55,19 +50,6 @@ const AFTER_LONG_HELP: &str = "\
   \x1b[32m{Time}\x1b[0m             検知時刻     例: 103020
   \x1b[32m{DateTime}\x1b[0m         日時         例: 20240302_103020
   \x1b[32m{Destination}\x1b[0m      直前のアクションの出力先（連鎖用）
-
-\x1b[33;1m▶ CSV インポート列順\x1b[0m  \x1b[2m（--from-csv）\x1b[0m
-  rule_name, enabled, watch_path, recursive, target, include_hidden,
-  patterns, regex, exclude_patterns, events,
-  action_type, destination, overwrite, preserve_structure, verify_integrity,
-  shell, command, program, args, working_dir,
-  exclude_regex, dir_patterns, dir_regex, exclude_dir_patterns, exclude_dir_regex,
-  auto_create, delay_ms
-
-  複数アクションのルール: rule_name を同じにして行を追加
-  複数値フィールド（patterns / events / args 等）: | で区切る  例: create|modify
-  真偽値: true / false（Excel の TRUE / FALSE、1 / 0、yes / no も可）
-  ※ 列21以降（exclude_regex〜）は省略可（既存 CSV との後方互換のため末尾）
 ";
 
 #[derive(clap::ValueEnum, Clone)]
@@ -76,8 +58,6 @@ enum InitType {
     Global,
     /// rules.toml のテンプレートを出力
     Rules,
-    /// rules.csv のテンプレートを出力
-    Csv,
 }
 
 /// ファイル監視・自動処理ツール
@@ -93,13 +73,10 @@ struct Args {
     /// 設定ファイルのバリデーションのみ実行して終了
     #[arg(long)]
     validate: bool,
-    /// CSV ファイルから rules.toml を生成
-    #[arg(long, value_name = "CSV")]
-    from_csv: Option<PathBuf>,
-    /// 出力先ファイルパス（--from-csv または --init と組み合わせて使用）
+    /// 出力先ファイルパス（--init と組み合わせて使用）
     #[arg(long, value_name = "FILE")]
     output: Option<PathBuf>,
-    /// テンプレートファイルを出力する（複数指定可: global rules csv）
+    /// テンプレートファイルを出力する（複数指定可: global rules）
     #[arg(long, value_name = "TYPE", num_args = 1..)]
     init: Vec<InitType>,
 }
@@ -124,11 +101,6 @@ fn main() {
         let _ = Args::command().print_long_help();
         println!();
         std::process::exit(2);
-    }
-
-    if let Some(ref csv_path) = args.from_csv {
-        exit_on_err(csv_import::run(csv_path, args.output.as_deref()));
-        return;
     }
 
     if !args.init.is_empty() {
@@ -228,14 +200,6 @@ async fn run(cli: &Args) -> Result<(), AppError> {
     result
 }
 
-fn exit_on_err(result: Result<(), AppError>) {
-    if let Err(e) = result {
-        let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-        eprintln!("{}", format!("[{ts}] [ERROR] {e}").red().bold());
-        std::process::exit(1);
-    }
-}
-
 #[cfg(windows)]
 fn hide_console_window() {
     use windows_sys::Win32::System::Console::GetConsoleWindow;
@@ -252,7 +216,6 @@ fn run_init(init_type: &InitType, output: Option<&std::path::Path>) -> Result<()
     let (content, default_name) = match init_type {
         InitType::Global => (templates::GLOBAL_TOML, "global.toml"),
         InitType::Rules  => (templates::RULES_TOML,  "rules.toml"),
-        InitType::Csv    => (templates::RULES_CSV,    "rules.csv"),
     };
 
     if let Some(path) = output {

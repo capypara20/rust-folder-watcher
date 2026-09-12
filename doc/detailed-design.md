@@ -25,9 +25,8 @@
 12. [ログ仕様](#12-ログ仕様)
 13. [安全性対策](#13-安全性対策)
 14. [Windows 固有の考慮事項](#14-windows-固有の考慮事項)
-15. [CSV→TOML 変換ツール（csv2toml）](#15-csvtoml-変換ツールcsv2toml)
-16. [モジュール構成](#16-モジュール構成)
-17. [使用クレート](#17-使用クレート)
+15. [モジュール構成](#15-モジュール構成)
+16. [使用クレート](#16-使用クレート)
 
 ---
 
@@ -38,9 +37,7 @@
 | 成果物 | 説明 |
 |--------|------|
 | `cat-watcher.exe` | ファイル監視アプリケーション本体 |
-| `csv2toml.exe` | CSV→TOML 変換ツール |
 
-両ツールは同一 Cargo ワークスペースで管理する。
 
 ### 1.2 リポジトリ構成
 
@@ -61,13 +58,9 @@ cat-watcher/                # 監視アプリ本体
 │       │   └── execute.rs
 │       ├── placeholder.rs
 │       └── error.rs
-csv2toml/               # CSV→TOML 変換ツール
-│   ├── Cargo.toml
-│   └── src/
 config/                 # 設定ファイルサンプル
 │   ├── global.toml
 │   ├── rules.toml
-│   └── rules.csv
 doc/                    # ドキュメント
 tool/                   # 補助スクリプト
 ```
@@ -116,7 +109,7 @@ Logger（tracing / JSON 構造化ログ → ファイル出力）
 | ファイル | 用途 | 管理方法 |
 |---------|------|---------|
 | `global.toml` | グローバル設定（ログ、リトライ等） | 手動編集 |
-| `rules.toml` | 監視ルール定義 | csv2toml 変換ツールで生成（手動編集も可） |
+| `rules.toml` | 監視ルール定義 | 手動編集（`--init rules` で雛形を生成） |
 
 **設計方針**:
 - すべての設定項目にデフォルト値を持たない。省略した場合はバリデーションエラー
@@ -262,53 +255,32 @@ verify_integrity = true
 
 ## 4. CLI 仕様
 
-### 4.1 watcher
+### 4.1 コマンドライン
 
 ```
-watcher.exe --global <path> --rules <path> [OPTIONS]
+cat-watcher [OPTIONS]
 ```
 
-| オプション | 短縮 | 必須 | 説明 |
-|-----------|------|------|------|
-| `--global <path>` | `-g` | ○ | `global.toml` のパス |
-| `--rules <path>` | `-r` | ○ | `rules.toml` のパス |
-| `--dry-run` | | | ドライランモード（`global.toml` 設定を上書き） |
-| `--log-level <level>` | | | ログレベル上書き |
-| `--validate` | | | バリデーション専用モード（監視は開始しない） |
-| `--version` | `-V` | | バージョン表示 |
-| `--help` | `-h` | | ヘルプ表示 |
+| オプション | 短縮 | 説明 |
+|-----------|------|------|
+| `--global <path>` | `-g` | `global.toml` のパス |
+| `--rules <path>` | `-r` | `rules.toml` のパス |
+| `--validate` | | バリデーション専用モード（監視は開始しない） |
+| `--init <type>...` | | テンプレートを出力する。値は `global` / `rules`（複数指定可） |
+| `--output <path>` | | `--init` の出力先。`--init` が 1 種類のときだけ使える |
+| `--help` | `-h` | ヘルプ表示 |
+
+`--global` / `--rules` はどちらも省略できる。省略した場合は `global.toml` /
+`rules.toml` を「カレントディレクトリ → 実行ファイルと同じフォルダ」の順に探す。
+ダブルクリック起動や、オプションなしでのサービス登録でもそのまま動かすための仕組み。
 
 #### 終了コード
 
 | コード | 意味 |
 |--------|------|
-| `0` | 正常終了（グレースフルシャットダウン / `--validate` 成功） |
-| `1` | 設定ファイルエラー（パース失敗、バリデーションエラー） |
-| `2` | 実行時致命的エラー（監視ディレクトリ消失等） |
-
-### 4.2 csv2toml
-
-```
-csv2toml.exe --input <path> --output <path> [OPTIONS]
-```
-
-| オプション | 短縮 | 必須 | 説明 |
-|-----------|------|------|------|
-| `--input <path>` | `-i` | ○ | 入力 CSV ファイルパス |
-| `--output <path>` | `-o` | ○ | 出力 TOML ファイルパス |
-| `--validate` | | | バリデーション専用モード |
-| `--dry-run` | | | 変換結果を stdout に出力（ファイル書き出しなし） |
-| `--version` | `-V` | | バージョン表示 |
-| `--help` | `-h` | | ヘルプ表示 |
-
-#### 終了コード
-
-| コード | 意味 |
-|--------|------|
-| `0` | 正常終了 |
-| `1` | エラー（CSV パース失敗、バリデーションエラー） |
-
----
+| `0` | 正常終了（グレースフルシャットダウン / `--validate` 成功 / `--init` 成功） |
+| `1` | エラー（設定のパース失敗、バリデーションエラー、テンプレート出力失敗、実行時エラー） |
+| `2` | 引数なしで起動し、既定の場所に `global.toml` / `rules.toml` が無いためヘルプを表示した |
 
 ## 5. 起動・終了シーケンス
 
@@ -815,67 +787,9 @@ JSON 構造化ログ。1 行 1 JSON オブジェクト。
 
 ---
 
-## 15. CSV→TOML 変換ツール（csv2toml）
+## 15. モジュール構成
 
-### 15.1 変換対象
-
-| 入力 | 出力 |
-|------|------|
-| `rules.csv` | `rules.toml` |
-
-`global.toml` は手動編集のため変換対象外。
-
-### 15.2 CSV フォーマット
-
-#### 列定義
-
-| 列名 | 型 | 必須 | 説明 |
-|------|----|------|------|
-| `name` | string | ○ | ルール名 |
-| `enabled` | bool | ○ | 有効/無効 |
-| `watch_path` | string | ○ | 監視対象ディレクトリ |
-| `recursive` | bool | ○ | サブディレクトリ監視 |
-| `target` | string | ○ | `file` / `directory` / `both` |
-| `include_hidden` | bool | ○ | 隠しファイル・隠しフォルダを含めるか: `true` / `false` |
-| `patterns` | string | ※ | glob パターン（`\|` 区切りで複数） |
-| `exclude_patterns` | string | | 除外パターン（`\|` 区切り） |
-| `regex` | string | ※ | 正規表現（`patterns` と排他） |
-| `events` | string | ○ | イベント種別（`\|` 区切り） |
-| `action_type` | string | ○ | `copy` / `move` / `command` / `execute` |
-| `action_destination` | string | copy/move 時 ○ | コピー/移動先 |
-| `action_overwrite` | bool | copy/move 時 ○ | 上書き許可 |
-| `action_preserve_structure` | bool | copy/move 時 ○ | 構造維持 |
-| `action_verify_integrity` | bool | copy/move 時 ○ | BLAKE3 ハッシュ値比較による完全性検証 |
-| `action_shell` | string | command 時 ○ | `cmd` / `powershell` / `pwsh` |
-| `action_command` | string | command 時 ○ | 実行コマンド |
-| `action_program` | string | execute 時 ○ | 実行ファイル |
-| `action_args` | string | execute 時 ○ | 引数（`\|` 区切り） |
-| `action_working_dir` | string | | 作業ディレクトリ |
-
-※ `patterns` と `regex` はいずれか一方を必ず指定。
-
-#### CSV ルール
-
-- **列識別**: ヘッダ名で識別（列順序に依存しない）
-- **空白処理**: 値の前後をトリム。`""` 内の空白は保持
-- **BOM**: BOM 付き UTF-8 を想定
-- **アクションチェーン**: 同一 `name` の複数行で表現。上から順に実行
-
-### 15.3 バリデーション
-
-| チェック項目 | 説明 |
-|-------------|------|
-| 必須項目の存在 | 列ヘッダと値の両方をチェック |
-| `patterns` / `regex` 排他 | 両方指定・両方省略はエラー |
-| `action_type` ごとの必須フィールド | 型に応じた必須チェック |
-| `name` 重複時の watch 設定不一致 | 同名ルールの watch 設定が異なる場合はエラー |
-| パスの正規化 | `\` → `/` に統一 |
-
----
-
-## 16. モジュール構成
-
-### 16.1 watcher クレート
+### 15.1 watcher クレート
 
 | モジュール | 責務 |
 |-----------|------|
@@ -891,15 +805,7 @@ JSON 構造化ログ。1 行 1 JSON オブジェクト。
 | `placeholder.rs` | プレースホルダの解析・展開 |
 | `error.rs` | エラー型定義 |
 
-### 16.2 csv2toml クレート
-
-| モジュール | 責務 |
-|-----------|------|
-| `main.rs` | エントリポイント、CLI パース、変換・バリデーション制御 |
-
----
-
-## 17. 使用クレート
+## 16. 使用クレート
 
 | 用途 | クレート |
 |------|---------|
