@@ -85,6 +85,46 @@ pub fn validate_global_config(config: &GlobalConfig) -> Result<(), AppError> {
 	finish_validation(errors)
 }
 
+/// glob パターン列の構文を検査する。
+///
+/// patterns / exclude_patterns / dir_patterns / exclude_dir_patterns の 4 種で共用する。
+/// `field` はエラーメッセージに出す設定キー名。
+fn collect_glob_errors(patterns: &[String], rule_id: &str, field: &str, errors: &mut Vec<String>) {
+	for pt in patterns {
+		if let Err(e) = Glob::new(pt) {
+			errors.push(format!("監視ルール名 {} の {} に無効な glob があります '{}': {}", rule_id, field, pt, e));
+		}
+	}
+}
+
+/// 正規表現の構文を検査する。
+///
+/// regex / exclude_regex / dir_regex / exclude_dir_regex の 4 種で共用する。
+fn collect_regex_errors(pattern: Option<&str>, rule_id: &str, field: &str, errors: &mut Vec<String>) {
+	if let Some(re_str) = pattern {
+		if let Err(e) = Regex::new(re_str) {
+			errors.push(format!("監視ルール名 {} の {} に無効な正規表現があります '{}': {}", rule_id, field, re_str, e));
+		}
+	}
+}
+
+/// glob 列と正規表現が両方指定されていないかを検査する。
+///
+/// watch.patterns と watch.regex だけは「どちらか一方が必須」で意味が違うため、
+/// ここではなく呼び出し側で個別に判定している。
+fn collect_exclusive_error(
+	patterns: &[String],
+	regex: Option<&str>,
+	rule_id: &str,
+	glob_field: &str,
+	regex_field: &str,
+	errors: &mut Vec<String>,
+) {
+	if !patterns.is_empty() && regex.is_some() {
+		errors.push(format!("監視ルール名 {} の {} と {} は片方のみ定義できます", rule_id, glob_field, regex_field));
+	}
+}
+
 pub fn validate_rules_config(config: &RulesConfig) -> Result<(), AppError> {
 	let mut errors = Vec::new();
 	let rules = &config.rules;
@@ -124,67 +164,43 @@ pub fn validate_rules_config(config: &RulesConfig) -> Result<(), AppError> {
 			errors.push(format!("監視ルール名 {} の watch.path が存在しません: {}", rule_id, watch_path.display()));
 		}
 
-		if let Some(patterns) = &rule.watch.patterns {
-			for pt in patterns {
-				if let Err(e) = Glob::new(pt) {
-					errors.push(format!("監視ルール名 {} の patterns に無効な glob があります '{}': {}", rule_id, pt, e));
-				}
-			}
-		}
+		// glob / 正規表現の構文チェックと、glob 列と正規表現の排他チェック。
+		// errors に積む順番がそのままエラー表示の順番になるので、並びは変えないこと。
+		collect_glob_errors(rule.watch.patterns.as_deref().unwrap_or(&[]), &rule_id, "patterns", &mut errors);
+		collect_regex_errors(rule.watch.regex.as_deref(), &rule_id, "regex", &mut errors);
 
-		if let Some(regex_str) = &rule.watch.regex {
-			if let Err(e) = Regex::new(regex_str) {
-				errors.push(format!("監視ルール名 {} の regex に無効な正規表現があります '{}': {}", rule_id, regex_str, e));
-			}
-		}
+		collect_glob_errors(&rule.watch.exclude_patterns, &rule_id, "exclude_patterns", &mut errors);
+		collect_exclusive_error(
+			&rule.watch.exclude_patterns,
+			rule.watch.exclude_regex.as_deref(),
+			&rule_id,
+			"exclude_patterns",
+			"exclude_regex",
+			&mut errors,
+		);
+		collect_regex_errors(rule.watch.exclude_regex.as_deref(), &rule_id, "exclude_regex", &mut errors);
 
-		for glob in &rule.watch.exclude_patterns {
-			if let Err(e) = Glob::new(glob) {
-				errors.push(format!("監視ルール名 {} の exclude_patterns に無効な glob があります '{}': {}", rule_id, glob, e));
-			}
-		}
+		collect_exclusive_error(
+			&rule.watch.exclude_dir_patterns,
+			rule.watch.exclude_dir_regex.as_deref(),
+			&rule_id,
+			"exclude_dir_patterns",
+			"exclude_dir_regex",
+			&mut errors,
+		);
+		collect_glob_errors(&rule.watch.exclude_dir_patterns, &rule_id, "exclude_dir_patterns", &mut errors);
+		collect_regex_errors(rule.watch.exclude_dir_regex.as_deref(), &rule_id, "exclude_dir_regex", &mut errors);
 
-		if !rule.watch.exclude_patterns.is_empty() && rule.watch.exclude_regex.is_some() {
-			errors.push(format!("監視ルール名 {} の exclude_patterns と exclude_regex は片方のみ定義できます", rule_id));
-		}
-
-		if let Some(re_str) = &rule.watch.exclude_regex {
-			if let Err(e) = Regex::new(re_str) {
-				errors.push(format!("監視ルール名 {} の exclude_regex に無効な正規表現があります '{}': {}", rule_id, re_str, e));
-			}
-		}
-
-		if !rule.watch.exclude_dir_patterns.is_empty() && rule.watch.exclude_dir_regex.is_some() {
-			errors.push(format!("監視ルール名 {} の exclude_dir_patterns と exclude_dir_regex は片方のみ定義できます", rule_id));
-		}
-
-		for glob in &rule.watch.exclude_dir_patterns {
-			if let Err(e) = Glob::new(glob) {
-				errors.push(format!("監視ルール名 {} の exclude_dir_patterns に無効な glob があります '{}': {}", rule_id, glob, e));
-			}
-		}
-
-		if let Some(re_str) = &rule.watch.exclude_dir_regex {
-			if let Err(e) = Regex::new(re_str) {
-				errors.push(format!("監視ルール名 {} の exclude_dir_regex に無効な正規表現があります '{}': {}", rule_id, re_str, e));
-			}
-		}
-
-		if !rule.watch.dir_patterns.is_empty() && rule.watch.dir_regex.is_some() {
-			errors.push(format!("監視ルール名 {} の dir_patterns と dir_regex は片方のみ定義できます", rule_id));
-		}
-
-		for glob in &rule.watch.dir_patterns {
-			if let Err(e) = Glob::new(glob) {
-				errors.push(format!("監視ルール名 {} の dir_patterns に無効な glob があります '{}': {}", rule_id, glob, e));
-			}
-		}
-
-		if let Some(re_str) = &rule.watch.dir_regex {
-			if let Err(e) = Regex::new(re_str) {
-				errors.push(format!("監視ルール名 {} の dir_regex に無効な正規表現があります '{}': {}", rule_id, re_str, e));
-			}
-		}
+		collect_exclusive_error(
+			&rule.watch.dir_patterns,
+			rule.watch.dir_regex.as_deref(),
+			&rule_id,
+			"dir_patterns",
+			"dir_regex",
+			&mut errors,
+		);
+		collect_glob_errors(&rule.watch.dir_patterns, &rule_id, "dir_patterns", &mut errors);
+		collect_regex_errors(rule.watch.dir_regex.as_deref(), &rule_id, "dir_regex", &mut errors);
 
 		if let Some(rule_log) = &rule.log {
 			if let Some(detect) = &rule_log.detect {

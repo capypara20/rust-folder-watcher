@@ -1,4 +1,5 @@
 use super::*;
+use crate::config::Watch;
 use notify::event::{DataChange, RenameMode};
 use std::collections::HashSet;
 use tempfile::TempDir;
@@ -336,4 +337,87 @@ fn test_dir_regex() {
 
     assert!(evaluate_rule(&in_reports, &events, None, &rule));
     assert!(!evaluate_rule(&in_other, &events, None, &rule));
+}
+
+// =========================================================
+// compile_rules: watch.patterns の Option セマンティクスを守る
+// =========================================================
+
+/// `compile_rules` に生の Rule を通すためのヘルパー。フィルタ以外は最小構成。
+fn make_raw_rule(patterns: Option<Vec<&str>>) -> Rule {
+    Rule {
+        enabled: true,
+        name: "compile-test".to_string(),
+        watch: Watch {
+            path: ".".to_string(),
+            recursive: false,
+            target: WatchTarget::Both,
+            include_hidden: false,
+            patterns: patterns.map(|p| p.into_iter().map(String::from).collect()),
+            regex: None,
+            exclude_patterns: vec![],
+            exclude_regex: None,
+            exclude_dir_patterns: vec![],
+            exclude_dir_regex: None,
+            dir_patterns: vec![],
+            dir_regex: None,
+            events: vec![Event::Create],
+        },
+        actions: vec![],
+        log: None,
+    }
+}
+
+/// `watch.patterns` は Option であり、空リストの明示と未指定は意味が違う。
+///
+/// - `patterns = []` → Some(空 GlobSet) = 何にもマッチしない
+/// - キー自体が無い  → None             = フィルタなしで全通過
+///
+/// 他の 3 種（exclude_patterns / dir_patterns / exclude_dir_patterns）は
+/// `Vec<String>` なので「空 = 未指定」でよいが、patterns だけは違う。
+/// 共通化のときにここを「空なら None」へ倒すと、本来 1 件も検知しないはずの
+/// ルールが全ファイルにマッチする重大な回帰になるため、番人として残す。
+#[test]
+fn test_compile_rules_keeps_empty_patterns_distinct_from_none() {
+    let (compiled, _handles) = compile_rules(&[make_raw_rule(Some(vec![]))]).unwrap();
+    let glob_set = compiled[0]
+        .glob_set
+        .as_ref()
+        .expect("patterns = [] は None ではなく Some(空 GlobSet) になること");
+    assert!(
+        !glob_set.is_match("anything.txt"),
+        "空の GlobSet は何にもマッチしないこと"
+    );
+
+    let (compiled, _handles) = compile_rules(&[make_raw_rule(None)]).unwrap();
+    assert!(
+        compiled[0].glob_set.is_none(),
+        "patterns 未指定は None のままであること"
+    );
+
+    let (compiled, _handles) = compile_rules(&[make_raw_rule(Some(vec!["*.csv"]))]).unwrap();
+    let glob_set = compiled[0].glob_set.as_ref().unwrap();
+    assert!(glob_set.is_match("a.csv"));
+    assert!(!glob_set.is_match("a.txt"));
+}
+
+/// 上のセマンティクスが matches_pattern まで届いていることを確認する。
+#[test]
+fn test_empty_patterns_detects_nothing() {
+    let (compiled, _handles) = compile_rules(&[make_raw_rule(Some(vec![]))]).unwrap();
+    assert!(!matches_pattern(Path::new("./a.txt"), &compiled[0]));
+
+    let (compiled, _handles) = compile_rules(&[make_raw_rule(None)]).unwrap();
+    assert!(matches_pattern(Path::new("./a.txt"), &compiled[0]));
+}
+
+/// 不正な glob は GlobSet の構築時にエラーとして返ること（4 種すべて同じ経路）。
+#[test]
+fn test_compile_rules_reports_invalid_glob() {
+    // CompiledRule は Debug を実装していないので unwrap_err() は使えない。
+    match compile_rules(&[make_raw_rule(Some(vec!["["]))]) {
+        Err(AppError::Watch(_)) => {}
+        Err(other) => panic!("AppError::Watch を期待したが {:?} だった", other),
+        Ok(_) => panic!("不正な glob はエラーになること"),
+    }
 }
