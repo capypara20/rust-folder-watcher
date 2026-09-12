@@ -7,10 +7,9 @@ use crate::error::AppError;
 use crate::placeholder::PlaceholderContext;
 
 use super::common::{
-    ensure_dest_dir, ensure_parent_dir, expand_action_destination, resolve_dest_path,
-    try_copy_once, walk_entries, TransferOptions,
+    ensure_dest_dir, ensure_parent_dir, expand_action_destination, relative_to,
+    resolve_dest_path, resolve_folder_dest, try_copy_once, walk_entries, TransferOptions,
 };
-use super::copy::{relative_to, resolve_folder_dest};
 use super::ActionSink;
 
 /// エラーメッセージ内でこのアクションを指す表記。

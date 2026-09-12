@@ -79,75 +79,56 @@ pub struct CompiledRule{
 	pub action_logger: Option<Arc<Logger>>,
 }
 
+/// glob パターン列を 1 つの GlobSet にコンパイルする。
+///
+/// patterns / exclude_patterns / dir_patterns / exclude_dir_patterns の
+/// 4 種すべてがここを通る。
+fn build_glob_set(patterns: &[String]) -> Result<GlobSet, AppError> {
+	let mut builder = GlobSetBuilder::new();
+	for p in patterns {
+		builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
+	}
+	builder.build().map_err(|e| AppError::Watch(e.to_string()))
+}
+
+/// 空リストを「フィルタ指定なし」として扱う版。
+///
+/// exclude_patterns / dir_patterns / exclude_dir_patterns は TOML 既定値が
+/// 空 Vec なので、空 = 未指定とみなしてよい。
+/// watch.patterns は Option なのでこちらではなく build_glob_set を直接使う。
+fn build_glob_set_if_any(patterns: &[String]) -> Result<Option<GlobSet>, AppError> {
+	if patterns.is_empty() {
+		Ok(None)
+	} else {
+		build_glob_set(patterns).map(Some)
+	}
+}
+
+/// 正規表現文字列をコンパイルする。未指定なら None。
+///
+/// regex / exclude_regex / dir_regex / exclude_dir_regex の 4 種で共用する。
+fn build_regex(pattern: Option<&str>) -> Result<Option<Regex>, AppError> {
+	pattern
+		.map(|re| Regex::new(re).map_err(|e| AppError::Watch(e.to_string())))
+		.transpose()
+}
+
 pub fn compile_rules(rules: &[Rule]) -> Result<(Vec<CompiledRule>, Vec<tokio::task::JoinHandle<()>>), AppError> {
 	let mut compiled_rules = Vec::new();
 	let mut log_handles = Vec::new();
 	for rule in rules{
-		let glob_set = if let Some(patterns) = &rule.watch.patterns {
-			let mut builder = GlobSetBuilder::new();
-			for p in patterns {
-				builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
-			}
-			Some(builder.build().map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
-		// exclude_patterns → GlobSet
-		// regex → Regex
-		// CompiledRule を生成して compiled_rules に追加
-		let exclude_glob_set = if !rule.watch.exclude_patterns.is_empty() {
-			let mut builder = GlobSetBuilder::new();
-			for p in &rule.watch.exclude_patterns {
-				builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
-			}
-			Some(builder.build().map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
+		// watch.patterns だけは Option。TOML に `patterns = []` と空リストを
+		// 明示した場合は「何にもマッチしない GlobSet」であり、キー自体が無い
+		// None とは意味が違うため、Option の形をそのまま保つ。
+		let glob_set = rule.watch.patterns.as_deref().map(build_glob_set).transpose()?;
+		let exclude_glob_set = build_glob_set_if_any(&rule.watch.exclude_patterns)?;
+		let exclude_dir_glob_set = build_glob_set_if_any(&rule.watch.exclude_dir_patterns)?;
+		let dir_glob_set = build_glob_set_if_any(&rule.watch.dir_patterns)?;
 
-		let regexes = if let Some(re_str) = &rule.watch.regex {
-			Some(Regex::new(re_str).map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
-
-		let exclude_regex = if let Some(re_str) = &rule.watch.exclude_regex {
-			Some(Regex::new(re_str).map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
-
-		let exclude_dir_glob_set = if !rule.watch.exclude_dir_patterns.is_empty() {
-			let mut builder = GlobSetBuilder::new();
-			for p in &rule.watch.exclude_dir_patterns {
-				builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
-			}
-			Some(builder.build().map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
-
-		let exclude_dir_regex = if let Some(re_str) = &rule.watch.exclude_dir_regex {
-			Some(Regex::new(re_str).map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
-
-		let dir_glob_set = if !rule.watch.dir_patterns.is_empty() {
-			let mut builder = GlobSetBuilder::new();
-			for p in &rule.watch.dir_patterns {
-				builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
-			}
-			Some(builder.build().map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
-
-		let dir_regex = if let Some(re_str) = &rule.watch.dir_regex {
-			Some(Regex::new(re_str).map_err(|e| AppError::Watch(e.to_string()))?)
-		} else {
-			None
-		};
+		let regexes = build_regex(rule.watch.regex.as_deref())?;
+		let exclude_regex = build_regex(rule.watch.exclude_regex.as_deref())?;
+		let exclude_dir_regex = build_regex(rule.watch.exclude_dir_regex.as_deref())?;
+		let dir_regex = build_regex(rule.watch.dir_regex.as_deref())?;
 		
 		// 検知ログ・アクションログをそれぞれ個別に生成する（global からの
 		// フォールバックは廃止。各ターゲットが dir/file_name/rotation を必須で持つ）。

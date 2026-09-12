@@ -6,8 +6,8 @@ use crate::error::AppError;
 use crate::placeholder::PlaceholderContext;
 
 use super::common::{
-    ensure_dest_dir, ensure_parent_dir, expand_action_destination, resolve_dest_path,
-    try_copy_once, walk_entries, TransferOptions,
+    ensure_dest_dir, ensure_parent_dir, expand_action_destination, relative_to,
+    resolve_dest_path, resolve_folder_dest, try_copy_once, walk_entries, TransferOptions,
 };
 use super::ActionSink;
 
@@ -132,30 +132,6 @@ async fn copy_directory_recursive(
     ));
 
     Ok(Some(folder_dest))
-}
-
-/// フォルダごと転送するときの宛先フォルダを決める。
-/// copy / move で同じ規則なので共有する。
-pub(super) fn resolve_folder_dest(
-    src_dir: &Path,
-    dest_root: &Path,
-    watch_path: &Path,
-    preserve_structure: bool,
-) -> Result<PathBuf, AppError> {
-    if preserve_structure {
-        Ok(dest_root.join(relative_to(src_dir, watch_path)?))
-    } else {
-        let folder_name = src_dir
-            .file_name()
-            .ok_or_else(|| AppError::Action("フォルダ名の取得に失敗".to_string()))?;
-        Ok(dest_root.join(folder_name))
-    }
-}
-
-/// `base` からの相対パスを取り出す。取れない場合はアクションエラーにする。
-pub(super) fn relative_to<'a>(path: &'a Path, base: &Path) -> Result<&'a Path, AppError> {
-    path.strip_prefix(base)
-        .map_err(|e| AppError::Action(format!("相対パスの解決に失敗 ({}): {}", path.display(), e)))
 }
 
 #[cfg(test)]
