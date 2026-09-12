@@ -81,11 +81,29 @@ mod tests;
 - `dashboard` は default feature。依存を追加するときは `--no-default-features` でも
   ビルドが通るか確認する。
 
-## 詳細仕様
+## ドキュメント
 
-実装前に該当箇所を読むこと。`doc/detailed-design.md` が最も詳しい。
+> **`doc/` 配下はプロジェクト立ち上げ時に書いたもので、実装に追従できていない。
+> 迷ったら必ずコードを正とすること。** `doc/` は「何を作ろうとしたか」を知るための
+> 参考資料であって、現在の仕様書ではない。
 
-- `doc/requirements.md` — 要件定義
-- `doc/detailed-design.md` — 詳細設計（設定仕様・ルール評価・アクション・ログ・Windows 固有事項）
-- `doc/specification.md` — 運用仕様（設定例集・トラブルシューティング）
-- `README.md` — 利用者向けリファレンス
+- `README.md` — **利用者向けリファレンス。ここは比較的新しく、信頼できる**
+- `doc/requirements.md` — 要件定義（立ち上げ時）
+- `doc/detailed-design.md` — 詳細設計（立ち上げ時。設計意図を知りたいときに読む）
+- `doc/specification.md` — 運用仕様（立ち上げ時。設定例は古い可能性が高い）
+
+実際に見つかっているズレの例:
+
+- `doc/specification.md` の `[global]` に `log_level` / `dry_run` が載っているが、
+  **どちらも実装に存在しない**（`log_level` は v1.3.0 のログ設定刷新で廃止）
+- 設計書は `csv2toml.exe` という別バイナリを前提に書かれていた（実際は本体の
+  サブコマンドだった。CSV 機能自体 v2.1.0 で削除）
+
+**仕様を確かめたいときの優先順位**
+
+1. コード（`cat-watcher/src/`）と `src/tests/` のテスト
+2. `--help` の実出力（`main.rs` の `AFTER_LONG_HELP`）
+3. `README.md`
+4. `doc/`（あくまで参考）
+
+ドキュメントを直したときは、ついでに古い記述がないか周辺も確認すること。
