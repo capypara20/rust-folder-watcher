@@ -2,7 +2,7 @@ use crate::config::ActionConfig;
 use crate::error::AppError;
 use crate::placeholder::{expand_placeholders, PlaceholderContext};
 
-use super::spawn::{spawn_detached, SpawnArg};
+use super::spawn::{outcome_message, spawn_process, wait_mode_from, SpawnArg};
 use super::ActionSink;
 
 pub async fn execute(
@@ -28,15 +28,27 @@ pub async fn execute(
         .filter(|s| !s.is_empty());
 
     let (program, args) = build_shell_command(shell, &expanded)?;
+    let wait = wait_mode_from(action.wait, action.timeout_ms);
 
-    spawn_detached(&program, &args, working_dir).map_err(|e| {
-        AppError::Action(format!(
-            "command: プロセス起動失敗 (shell={shell} cmd={expanded}): {e}"
-        ))
-    })?;
+    let outcome = spawn_process(&program, &args, working_dir, wait)
+        .await
+        .map_err(|e| {
+            AppError::Action(format!(
+                "command: プロセス起動失敗 (shell={shell} cmd={expanded}): {e}"
+            ))
+        })?;
 
-    sink.ok(step.0, step.1, "起動".to_string());
-    Ok(())
+    match outcome_message(outcome) {
+        Ok(msg) => {
+            sink.ok(step.0, step.1, msg);
+            Ok(())
+        }
+        // wait = true のときだけ起こる。アクション失敗として扱うので、
+        // 以降のアクションチェーンは中断される。
+        Err(reason) => Err(AppError::Action(format!(
+            "command: {reason} (shell={shell} cmd={expanded})"
+        ))),
+    }
 }
 
 /// `shell` に指定できる値。この OS で実際に起動できるものだけを並べる。

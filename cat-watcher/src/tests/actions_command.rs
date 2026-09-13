@@ -130,3 +130,163 @@ fn bash_args_stay_quoted() {
         ]
     );
 }
+
+// =========================================================
+// 外部プロセスの終了コードとタイムアウト
+// =========================================================
+
+use crate::actions::spawn::{outcome_message, wait_mode_from, SpawnOutcome, WaitMode};
+
+/// wait = true を立てたアクションを作る。
+fn with_wait(mut a: ActionConfig, timeout_ms: Option<u64>) -> ActionConfig {
+    a.wait = Some(true);
+    a.timeout_ms = timeout_ms;
+    a
+}
+
+/// 設定値から待ち方を決めるところ。未指定と 0 の扱いがポイント。
+#[test]
+fn wait_mode_from_resolves_defaults() {
+    use std::time::Duration;
+
+    // 未指定と false はどちらも「待たない」
+    assert_eq!(wait_mode_from(None, None), WaitMode::Detach);
+    assert_eq!(wait_mode_from(Some(false), Some(1000)), WaitMode::Detach);
+
+    // timeout_ms の未指定と 0 はどちらも無制限
+    assert_eq!(
+        wait_mode_from(Some(true), None),
+        WaitMode::Wait { timeout: None }
+    );
+    assert_eq!(
+        wait_mode_from(Some(true), Some(0)),
+        WaitMode::Wait { timeout: None }
+    );
+
+    assert_eq!(
+        wait_mode_from(Some(true), Some(1500)),
+        WaitMode::Wait {
+            timeout: Some(Duration::from_millis(1500))
+        }
+    );
+}
+
+/// 起動結果が「成功として表示する文言」と「失敗理由」に正しく振り分けられること。
+#[test]
+fn outcome_message_distinguishes_success_and_failure() {
+    // wait = false のときの表記は従来どおり
+    assert_eq!(outcome_message(SpawnOutcome::Detached).unwrap(), "起動");
+    assert!(outcome_message(SpawnOutcome::Exited(Some(0))).is_ok());
+    // 終了コードが取れなかった場合は失敗と断定しない
+    assert!(outcome_message(SpawnOutcome::Exited(None)).is_ok());
+
+    let err = outcome_message(SpawnOutcome::Exited(Some(3))).unwrap_err();
+    assert!(err.contains("exit=3"), "終了コードが出ていない: {err}");
+    assert!(outcome_message(SpawnOutcome::TimedOut)
+        .unwrap_err()
+        .contains("強制終了"));
+}
+
+/// この OS で使えるシェルと、成功／失敗／長時間かかるコマンド。
+#[cfg(windows)]
+const PROBE: (&str, &str, &str, &str) = ("cmd", "exit 0", "exit 1", "ping -n 10 127.0.0.1 > nul");
+#[cfg(not(windows))]
+const PROBE: (&str, &str, &str, &str) = ("bash", "exit 0", "exit 1", "sleep 10");
+
+/// wait = true なら終了コードを見て、0 以外はアクション失敗にすること。
+/// これが入るまで、アクションログの OK は「起動できた」の意味しか無かった。
+#[tokio::test]
+async fn wait_true_reports_nonzero_exit_as_error() {
+    let (shell, ok_cmd, fail_cmd, _) = PROBE;
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("a.txt");
+    std::fs::write(&src, b"x").unwrap();
+    let ctx = make_ctx(&src, dir.path());
+
+    let action = with_wait(make_action(shell, fail_cmd, ""), None);
+    let err = execute(&action, &ctx, &make_sink(), (1, 1))
+        .await
+        .expect_err("終了コード 1 は失敗になること");
+    assert!(err.to_string().contains("exit=1"), "{err}");
+
+    let action = with_wait(make_action(shell, ok_cmd, ""), None);
+    assert!(execute(&action, &ctx, &make_sink(), (1, 1)).await.is_ok());
+}
+
+/// wait 未指定（既定 false）なら終了コードを見ないので、失敗するコマンドでも成功扱い。
+/// 既定の挙動が従来から変わっていないことの確認。
+#[tokio::test]
+async fn wait_false_ignores_exit_code() {
+    let (shell, _, fail_cmd, _) = PROBE;
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("a.txt");
+    std::fs::write(&src, b"x").unwrap();
+    let ctx = make_ctx(&src, dir.path());
+
+    let action = make_action(shell, fail_cmd, "");
+    assert!(
+        execute(&action, &ctx, &make_sink(), (1, 1)).await.is_ok(),
+        "wait 未指定なら終了コードを見ないこと"
+    );
+}
+
+/// 上限を超えたプロセスは強制終了してアクション失敗にすること。
+/// 無限ループなどで終わらなくなったプロセスを放置しないための保険。
+#[tokio::test]
+async fn wait_with_timeout_kills_long_running_process() {
+    let (shell, _, _, slow_cmd) = PROBE;
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("a.txt");
+    std::fs::write(&src, b"x").unwrap();
+    let ctx = make_ctx(&src, dir.path());
+
+    let action = with_wait(make_action(shell, slow_cmd, ""), Some(500));
+    let err = execute(&action, &ctx, &make_sink(), (1, 1))
+        .await
+        .expect_err("上限を超えたら失敗になること");
+    assert!(err.to_string().contains("強制終了"), "{err}");
+}
+
+/// タイムアウトでシェルの「子」まで止まること。
+///
+/// Windows では親プロセスを終了させても子は生き残る。command アクションは必ず
+/// シェルを経由するので、実際の処理をするプロセスは常に孫になる。シェルだけを
+/// 殺すと「止めたつもりで処理が続く」状態になり、ログが嘘をつく。
+///
+/// **目印ファイルを作るのは孫プロセス自身**にしてある。シェルが書く形にすると、
+/// シェルを殺しただけで目印が作られなくなり、孫が生きていても検出できない。
+#[tokio::test]
+async fn timeout_kills_whole_process_tree() {
+    use std::time::Duration;
+
+    let dir = tempdir().unwrap();
+    let src = dir.path().join("a.txt");
+    std::fs::write(&src, b"x").unwrap();
+    let ctx = make_ctx(&src, dir.path());
+
+    let marker = dir.path().join("marker.txt");
+    // パスはそのまま埋め込む（ソースにバックスラッシュを書かないため）。
+    let m = marker.display().to_string();
+
+    // 入れ子のシェルが孫プロセスになる。目印を書くのはその孫。
+    #[cfg(windows)]
+    let command = format!("cmd /C {Q}ping -n 3 127.0.0.1 > nul & echo done > {m}{Q}", Q = '"');
+    // 末尾の `; :` が重要。bash は「単一コマンドだけ」のとき exec で自分を置き換える
+    // 最適化をするため、それだと孫プロセスができずテストが空振りになる。
+    #[cfg(not(windows))]
+    let command = format!("bash -c 'sleep 2; echo done > {m}'; :");
+
+    let action = with_wait(make_action(PROBE.0, &command, ""), Some(500));
+    let err = execute(&action, &ctx, &make_sink(), (1, 1))
+        .await
+        .expect_err("上限を超えたら失敗になること");
+    assert!(err.to_string().contains("強制終了"), "{err}");
+
+    // 孫が生きていれば完走して目印を作る。それより長く待ってから確認する。
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert!(
+        !marker.exists(),
+        "シェルの子プロセスが生き残って処理を続けている: {}",
+        marker.display()
+    );
+}

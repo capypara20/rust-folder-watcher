@@ -25,6 +25,10 @@ pub struct GlobalConfig {
     /// 検知のデバウンス設定（省略可）。未指定なら既定値を使う。
     #[serde(default)]
     pub detect: Option<DetectConfig>,
+    /// command / execute が起動する外部プロセスの扱い（省略可）。
+    /// 未指定なら「終了を待たない」従来どおりの動作。
+    #[serde(default)]
+    pub action: Option<ActionDefaults>,
     /// Windows サービス設定（省略可）。未指定なら既定値を使う。
     // service フィールドは Windows のサービス起動経路でのみ参照するため、
     // 非 Windows ビルドでは未使用になる。
@@ -51,6 +55,18 @@ impl GlobalConfig {
             .as_ref()
             .map(|d| d.auto_create)
             .unwrap_or(true)
+    }
+
+    /// 外部プロセスの終了を待って終了コードを確認するか（全ルール共通の既定値）。
+    /// 各アクションの `wait` で個別に上書きできる。セクション未指定なら待たない。
+    pub fn wait_for_process(&self) -> bool {
+        self.action.as_ref().map(|a| a.wait).unwrap_or(false)
+    }
+
+    /// 外部プロセスの終了を待つ上限（ミリ秒、全ルール共通の既定値）。
+    /// `None` は無制限。各アクションの `timeout_ms` で個別に上書きできる。
+    pub fn process_timeout_ms(&self) -> Option<u64> {
+        self.action.as_ref().and_then(|a| a.timeout_ms)
     }
 
     /// 最後のイベントからこの時間だけ静かになったら「確定」とみなす（ミリ秒）。
@@ -123,6 +139,28 @@ pub struct DestinationConfig {
     ///   書き込むのを防ぎたいとき用）。
     #[serde(default = "default_true")]
     pub auto_create: bool,
+}
+
+/// command / execute が起動する外部プロセスの扱い（全ルール共通の既定値）。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActionDefaults {
+    /// 外部プロセスの終了を待って終了コードを確認するか。
+    ///
+    /// - `false`（既定）: 起動したら次のアクションへ進む。終了コードは見ないため、
+    ///   アクションログの OK は「起動できた」という意味しか持たない。
+    /// - `true`: 終了まで待ち、終了コードが 0 以外ならアクション失敗として扱う。
+    ///   アクションチェーンは前のプロセスが終わるまで次へ進まない。
+    #[serde(default)]
+    pub wait: bool,
+
+    /// `wait = true` のときに終了を待つ上限（ミリ秒）。
+    ///
+    /// 未指定または `0` は無制限（いつまでも待つ）。上限を超えた場合はプロセスを
+    /// 強制終了し、アクション失敗として扱う。無限ループなどで終わらなくなった
+    /// プロセスを放置しないための保険。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 /// 検知のデバウンス設定。エディタや同期ソフトが出す連続イベントを束ねる。
@@ -282,6 +320,17 @@ pub struct ActionConfig {
     // typeがExecuteのとき
     pub program: Option<String>,
     pub args: Option<Vec<String>>,
+
+    /// 外部プロセスの終了を待って終了コードを確認するか。未指定なら global.toml の
+    /// `[action] wait` に従う（設定読み込み後に解決され、バリデーションと実行時は
+    /// どちらもここに入った値だけを見る）。command / execute でのみ指定できる。
+    #[serde(default)]
+    pub wait: Option<bool>,
+
+    /// 終了を待つ上限（ミリ秒）。`0` は無制限。未指定なら global.toml の
+    /// `[action] timeout_ms` に従う。command / execute でのみ指定できる。
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 
     /// このアクションを実行する前に待つ時間（ミリ秒）。省略時は 0（待たない）。
     ///

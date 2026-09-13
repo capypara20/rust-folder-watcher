@@ -153,6 +153,17 @@ enabled = true
 [destination]
 auto_create = true
 
+# 外部プロセスの扱い（省略可・command / execute 用）
+# wait = false（既定）は「起動できたか」しか見ない。起動したスクリプトが
+#        エラーで落ちてもアクションログには OK と出る
+# wait = true  は終了まで待ち、終了コードが 0 以外ならアクション失敗にする
+#        （以降のアクションは中断）。前のプロセスが終わるまで次へ進まない
+# timeout_ms は待つ上限。0 または未指定で無制限。超えたら強制終了する
+# アクション側に wait / timeout_ms を書けば、この既定値を個別に上書きできる。
+[action]
+wait       = false
+timeout_ms = 0
+
 # 検知のデバウンス（省略可）
 # 最後のイベントから debounce_ms だけ静かになったら「確定」として 1 回処理する。
 #   巨大ファイルの書き込み完了を待ちたい → 長め（例: 3000）
@@ -235,6 +246,8 @@ delay_ms    = 2000                       # このアクションの実行前に�
 |---|---|---|
 | `delay_ms` | 整数 | このアクションを実行する前に待つミリ秒。省略時は 0。デバウンスだけでは足りないとき（巨大ファイルの書き込み完了待ち、前のアクションが起動した外部スクリプトの出力待ち）に使う |
 | `auto_create` | 真偽値 | copy / move 専用。宛先フォルダの自動作成を、この 1 アクションだけ切り替える。省略時は `global.toml` の `[destination] auto_create` に従う |
+| `wait` | 真偽値 | command / execute 専用。外部プロセスの終了を待って終了コードを確認する。省略時は `global.toml` の `[action] wait` に従う |
+| `timeout_ms` | 整数 | command / execute 専用。`wait` が有効なときに待つ上限ミリ秒。`0` は無制限。超えたらプロセスを強制終了してアクション失敗にする |
 
 ### 隠しファイル・隠しフォルダ（`include_hidden`）
 
@@ -299,11 +312,35 @@ exclude_dir_patterns = ["node_modules"]  # ただし node_modules は除外
 
 | type | 用途 | 主なオプション |
 |------|------|----------------|
-| `log`     | イベントをログファイルに記録するだけ（コマンド実行なし） | `message` |
 | `copy`    | ファイル / ディレクトリをコピー | `destination`, `overwrite`, `preserve_structure`, `verify_integrity` |
 | `move`    | ファイル / ディレクトリを移動 | `destination`, `overwrite`, `preserve_structure`, `verify_integrity` |
-| `command` | シェル経由でコマンド実行 | `shell`（Windows: `cmd` / `powershell` / `pwsh`、Linux: `bash` / `sh` / `pwsh`）, `command`, `working_dir` |
-| `execute` | プログラムを直接起動 | `program`, `args`, `working_dir` |
+| `command` | シェル経由でコマンド実行 | `shell`（Windows: `cmd` / `powershell` / `pwsh`、Linux: `bash` / `sh` / `pwsh`）, `command`, `working_dir`, `wait`, `timeout_ms` |
+| `execute` | プログラムを直接起動 | `program`, `args`, `working_dir`, `wait`, `timeout_ms` |
+
+### 外部プロセスの成否判定（`command` / `execute`）
+
+`wait` をどうするかで、アクションログの `OK` の意味が変わります。
+
+| `wait` | 動作 | ログの `OK` の意味 |
+|---|---|---|
+| `false`（既定） | 起動したら次のアクションへ進む | **プロセスを起動できた**。起動後にスクリプトがエラーで落ちても検知できない |
+| `true` | 終了まで待ち、終了コードを確認する | **終了コード 0 で終わった**。0 以外ならアクション失敗として扱い、以降のアクションは中断する |
+
+`wait = true` のときの注意点です。
+
+- 前のプロセスが終わるまで次のアクションへ進みません。長時間かかる処理を起動している場合、検知の処理が詰まることがあります
+- `timeout_ms` を設定すると、その時間を超えた時点でプロセスを**強制終了**してアクション失敗にします。無限ループなどで終わらなくなったプロセスを放置しないための保険です（`0` または未指定で無制限）
+- 終了を待つだけなので、ポーリングは行いません。CPU 負荷はほぼかかりません
+
+```toml
+[[rules.actions]]
+type        = "command"
+shell       = "pwsh"
+command     = "& C:/tool/convert.ps1 {FullName}"
+working_dir = ""
+wait        = true        # 変換が終わるまで待ち、失敗したら後続を止める
+timeout_ms  = 60000       # 1 分で終わらなければ強制終了
+```
 
 ### move の動作
 

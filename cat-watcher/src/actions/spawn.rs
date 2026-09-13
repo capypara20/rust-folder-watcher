@@ -1,4 +1,5 @@
 use std::process::Stdio;
+use std::time::Duration;
 
 /// 外部プロセスへ渡す引数 1 つ。
 ///
@@ -20,7 +21,42 @@ pub enum SpawnArg {
     Raw(String),
 }
 
-/// 外部プロセスを fire-and-forget で起動する共通ヘルパ。
+/// 起動した外部プロセスの終了を待つかどうか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitMode {
+    /// 待たない。起動できたらすぐ次のアクションへ進む（従来の動作）。
+    Detach,
+    /// 終了まで待つ。`timeout` が `Some` ならその時間を超えた時点で強制終了する
+    /// （`None` は無制限）。
+    Wait { timeout: Option<Duration> },
+}
+
+/// 設定値（解決済みの `wait` / `timeout_ms`）から待ち方を決める。
+///
+/// `timeout_ms` が未指定または `0` の場合は「無制限」として扱う。
+pub fn wait_mode_from(wait: Option<bool>, timeout_ms: Option<u64>) -> WaitMode {
+    if wait.unwrap_or(false) {
+        WaitMode::Wait {
+            timeout: timeout_ms.filter(|ms| *ms > 0).map(Duration::from_millis),
+        }
+    } else {
+        WaitMode::Detach
+    }
+}
+
+/// 外部プロセスを起動した結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnOutcome {
+    /// 終了を待たずに起動だけした。
+    Detached,
+    /// 終了まで待った。終了コードが取得できなかった場合は `None`
+    /// （Unix でシグナルにより終了した場合など）。
+    Exited(Option<i32>),
+    /// 上限時間を超えたので強制終了した。
+    TimedOut,
+}
+
+/// 外部プロセスを起動する。
 ///
 /// 通常は OS 既定の権限で起動する（CLI 実行ならログオンユーザー、サービス実行
 /// ならサービスアカウント）。Windows のサービスモードかつ `run_as_logged_in_user`
@@ -29,17 +65,29 @@ pub enum SpawnArg {
 ///
 /// 起動失敗時はエラー内容の文字列を返す。呼び出し側でアクション種別ごとの
 /// メッセージへ整形する。
-pub fn spawn_detached(
+pub async fn spawn_process(
     program: &str,
     args: &[SpawnArg],
     working_dir: Option<&str>,
-) -> Result<(), String> {
+    wait: WaitMode,
+) -> Result<SpawnOutcome, String> {
     #[cfg(windows)]
     {
         use crate::platform::win_runas::{self, RunAsResult};
         if win_runas::enabled() {
-            match win_runas::spawn_as_active_user(program, args, working_dir) {
-                RunAsResult::Spawned => return Ok(()),
+            // CreateProcessAsUserW も WaitForSingleObject もブロッキング呼び出しな
+            // ので、tokio のワーカースレッドを塞がないよう専用スレッドへ出す。
+            let program = program.to_string();
+            let args = args.to_vec();
+            let working_dir = working_dir.map(|s| s.to_string());
+            let result = tokio::task::spawn_blocking(move || {
+                win_runas::spawn_as_active_user(&program, &args, working_dir.as_deref(), wait)
+            })
+            .await
+            .map_err(|e| format!("起動タスクの実行に失敗: {e}"))?;
+
+            match result {
+                RunAsResult::Spawned(outcome) => return Ok(outcome),
                 // ログオンユーザー不在: サービスアカウント権限での起動へフォールバック
                 RunAsResult::NoActiveUser => {}
                 RunAsResult::Err(e) => return Err(e),
@@ -75,5 +123,79 @@ pub fn spawn_detached(
         cmd.current_dir(dir);
     }
 
-    cmd.spawn().map(|_| ()).map_err(|e| e.to_string())
+    match wait {
+        WaitMode::Detach => cmd
+            .spawn()
+            .map(|_| SpawnOutcome::Detached)
+            .map_err(|e| e.to_string()),
+        WaitMode::Wait { timeout } => {
+            // 上限を超えたときに「シェルだけ」ではなくツリー全体を終了させたい。
+            // command アクションは必ず cmd.exe / bash を経由するので、実際の処理を
+            // するプロセスは常に孫になる。シェルを殺しても処理は止まらない。
+            #[cfg(unix)]
+            if timeout.is_some() {
+                // 新しいプロセスグループにしておけば killpg でまとめて落とせる。
+                cmd.process_group(0);
+            }
+
+            let mut child = cmd.spawn().map_err(|e| e.to_string())?;
+
+            // Windows は Job Object に入れておき、TerminateJobObject でツリーごと
+            // 終了させる。割り当てに失敗してもツリー終了ができなくなるだけなので、
+            // 起動自体は続行する。
+            #[cfg(windows)]
+            let job = timeout.and_then(|_| {
+                child
+                    .raw_handle()
+                    .and_then(|h| crate::platform::win_job::JobHandle::assign(h).ok())
+            });
+
+            let Some(limit) = timeout else {
+                return child
+                    .wait()
+                    .await
+                    .map(|status| SpawnOutcome::Exited(status.code()))
+                    .map_err(|e| e.to_string());
+            };
+
+            match tokio::time::timeout(limit, child.wait()).await {
+                Ok(Ok(status)) => Ok(SpawnOutcome::Exited(status.code())),
+                Ok(Err(e)) => Err(e.to_string()),
+                Err(_) => {
+                    // 上限超過。子孫を含めて終了させる。
+                    #[cfg(windows)]
+                    if let Some(job) = &job {
+                        job.terminate();
+                    }
+                    #[cfg(unix)]
+                    if let Some(pid) = child.id() {
+                        // プロセスグループ全体へ SIGKILL を送る。
+                        unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+                    }
+                    // シェル自身も確実に終了させ、ゾンビを残さないよう回収する。
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    Ok(SpawnOutcome::TimedOut)
+                }
+            }
+        }
+    }
+}
+
+/// 起動結果をアクションログ用の文言へ変える。
+///
+/// `Ok` は成功としてそのまま表示する文言、`Err` は失敗理由。
+/// 呼び出し側が「どのアクションか」の情報を足してエラーメッセージを組み立てる。
+pub fn outcome_message(outcome: SpawnOutcome) -> Result<String, String> {
+    match outcome {
+        // wait = false のときの表記。従来と同じにしてログの形を変えない。
+        SpawnOutcome::Detached => Ok("起動".to_string()),
+        SpawnOutcome::Exited(Some(0)) => Ok("完了 (exit=0)".to_string()),
+        SpawnOutcome::Exited(Some(code)) => Err(format!("異常終了しました (exit={code})")),
+        // 終了はしたが終了コードが取れなかった場合。失敗とは断定できないので成功扱い。
+        SpawnOutcome::Exited(None) => Ok("完了（終了コードは取得できず）".to_string()),
+        SpawnOutcome::TimedOut => {
+            Err("時間内に終わらないため強制終了しました".to_string())
+        }
+    }
 }

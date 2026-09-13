@@ -16,15 +16,19 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::actions::spawn::SpawnArg;
-use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, FALSE, HANDLE};
+use super::win_job::JobHandle;
+use crate::actions::spawn::{SpawnArg, SpawnOutcome, WaitMode};
+use windows_sys::Win32::Foundation::{
+    CloseHandle, GetLastError, FALSE, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
 use windows_sys::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TokenPrimary, TOKEN_ALL_ACCESS,
 };
 use windows_sys::Win32::System::Environment::{CreateEnvironmentBlock, DestroyEnvironmentBlock};
 use windows_sys::Win32::System::RemoteDesktop::{WTSGetActiveConsoleSessionId, WTSQueryUserToken};
 use windows_sys::Win32::System::Threading::{
-    CreateProcessAsUserW, CREATE_NO_WINDOW, CREATE_UNICODE_ENVIRONMENT, PROCESS_INFORMATION,
+    CreateProcessAsUserW, GetExitCodeProcess, ResumeThread, TerminateProcess, WaitForSingleObject,
+    CREATE_NO_WINDOW, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT, INFINITE, PROCESS_INFORMATION,
     STARTUPINFOW,
 };
 
@@ -45,8 +49,8 @@ pub fn enabled() -> bool {
 
 /// [`spawn_as_active_user`] の結果。
 pub enum RunAsResult {
-    /// ログオンユーザー権限でプロセスを起動できた。
-    Spawned,
+    /// ログオンユーザー権限でプロセスを起動できた。待ち方に応じた結果を運ぶ。
+    Spawned(SpawnOutcome),
     /// アクティブなログオンユーザーがいない。呼び出し側はサービスアカウント
     /// 権限での起動へフォールバックすべき。
     NoActiveUser,
@@ -59,6 +63,7 @@ pub fn spawn_as_active_user(
     program: &str,
     args: &[SpawnArg],
     working_dir: Option<&str>,
+    wait: WaitMode,
 ) -> RunAsResult {
     // 1. 物理コンソールに紐づくアクティブセッションを取得する。
     //    0xFFFFFFFF はアクティブセッション無し（誰もログオンしていない）。
@@ -94,7 +99,7 @@ pub fn spawn_as_active_user(
         ));
     }
 
-    let result = unsafe { create_process(primary_token, program, args, working_dir) };
+    let result = unsafe { create_process(primary_token, program, args, working_dir, wait) };
     unsafe { CloseHandle(primary_token) };
     result
 }
@@ -106,6 +111,7 @@ unsafe fn create_process(
     program: &str,
     args: &[SpawnArg],
     working_dir: Option<&str>,
+    wait: WaitMode,
 ) -> RunAsResult {
     // ログオンユーザーの環境変数ブロックを作る（PATH・USERPROFILE 等の引き継ぎ）。
     // 失敗してもプロセス起動自体は続行できるよう、null 環境でフォールバックする。
@@ -132,6 +138,15 @@ unsafe fn create_process(
 
     let env_ptr: *const c_void = if env_ok { env_block } else { ptr::null() };
 
+    // 上限付きで待つ場合は、孫プロセスまでまとめて終了できるよう Job Object に入れる。
+    // 停止状態で作って「割り当て → 再開」の順にすれば、割り当てる前に孫が起動して
+    // しまう取りこぼしが起きない。
+    let use_job = matches!(wait, WaitMode::Wait { timeout: Some(_) });
+    let mut flags = CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW;
+    if use_job {
+        flags |= CREATE_SUSPENDED;
+    }
+
     let created = CreateProcessAsUserW(
         token,
         ptr::null(),                  // lpApplicationName（コマンドラインから解決）
@@ -139,7 +154,7 @@ unsafe fn create_process(
         ptr::null(),                  // プロセスのセキュリティ属性
         ptr::null(),                  // スレッドのセキュリティ属性
         FALSE,                        // ハンドル継承なし
-        CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
+        flags,
         env_ptr,
         working_dir_ptr,
         &startup,
@@ -156,11 +171,79 @@ unsafe fn create_process(
         return RunAsResult::Err(format!("CreateProcessAsUserW 失敗 (code={last_error})"));
     }
 
-    // 起動できたら fire-and-forget。プロセス／スレッドハンドルは閉じてよい
-    // （プロセス自体は動き続ける）。
-    CloseHandle(process_info.hProcess);
+    // Job への割り当ては、プロセスがまだ停止しているうちに済ませる。
+    // 失敗してもツリーごとの終了ができなくなるだけなので、起動自体は続行する。
+    let job = if use_job {
+        JobHandle::assign(process_info.hProcess).ok()
+    } else {
+        None
+    };
+
+    // 停止状態で作った場合はここから動かし始める。
+    if use_job {
+        ResumeThread(process_info.hThread);
+    }
     CloseHandle(process_info.hThread);
-    RunAsResult::Spawned
+
+    match wait {
+        WaitMode::Detach => {
+            // fire-and-forget。プロセスハンドルを閉じてもプロセスは動き続ける。
+            CloseHandle(process_info.hProcess);
+            RunAsResult::Spawned(SpawnOutcome::Detached)
+        }
+        WaitMode::Wait { timeout } => {
+            let outcome = wait_for_process(process_info.hProcess, timeout, job.as_ref());
+            CloseHandle(process_info.hProcess);
+            match outcome {
+                Ok(outcome) => RunAsResult::Spawned(outcome),
+                Err(e) => RunAsResult::Err(e),
+            }
+        }
+    }
+}
+
+/// プロセスの終了を待ち、終了コードを取得する。上限を超えた場合は強制終了する。
+///
+/// `WaitForSingleObject` はブロッキング呼び出しなので、呼び出し側が tokio の
+/// ワーカースレッドを塞がないよう専用スレッドで実行していることが前提。
+unsafe fn wait_for_process(
+    process: HANDLE,
+    timeout: Option<std::time::Duration>,
+    job: Option<&JobHandle>,
+) -> Result<SpawnOutcome, String> {
+    // INFINITE は「いつまでも待つ」。u32 に収まらない指定は上限で丸める。
+    let limit_ms = match timeout {
+        Some(d) => u32::try_from(d.as_millis()).unwrap_or(u32::MAX - 1),
+        None => INFINITE,
+    };
+
+    match WaitForSingleObject(process, limit_ms) {
+        WAIT_OBJECT_0 => {
+            let mut code: u32 = 0;
+            if GetExitCodeProcess(process, &mut code) != 0 {
+                Ok(SpawnOutcome::Exited(Some(code as i32)))
+            } else {
+                // 終了はしたが終了コードが取れなかった。失敗扱いにはしない。
+                Ok(SpawnOutcome::Exited(None))
+            }
+        }
+        WAIT_TIMEOUT => {
+            // 終わらないプロセスを放置しない。
+            // シェル（cmd.exe など）だけを殺しても、その先で動いている実処理の
+            // プロセスは生き残るため、Job があればツリーごと終了させる。
+            if let Some(job) = job {
+                job.terminate();
+            }
+            TerminateProcess(process, 1);
+            // 強制終了が効くまで少し待つ（効かなくても先へ進む）。
+            WaitForSingleObject(process, 5_000);
+            Ok(SpawnOutcome::TimedOut)
+        }
+        _ => Err(format!(
+            "WaitForSingleObject 失敗 (code={})",
+            GetLastError()
+        )),
+    }
 }
 
 /// NUL 終端の UTF-16 文字列を作る。

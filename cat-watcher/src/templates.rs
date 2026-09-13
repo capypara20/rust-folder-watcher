@@ -34,6 +34,19 @@ enabled = true
 [destination]
 auto_create = true
 
+# ─── 外部プロセスの扱い（command / execute）───────────────────────────
+# wait = false（既定）だと「起動できたか」しか見ません。起動したスクリプトが
+# エラーで落ちてもアクションログには OK と出ます。
+# wait = true にすると終了まで待ち、終了コードが 0 以外ならアクション失敗に
+# なります（以降のアクションは中断）。そのかわり、前のプロセスが終わるまで
+# 次のアクションへ進みません。
+#   timeout_ms: 待つ上限。0 または未指定は無制限。上限を超えたらプロセスを
+#               強制終了します（無限ループで終わらなくなった場合の保険）。
+# アクションごとに [[rules.actions]] 側で上書きできます。
+[action]
+wait       = false
+timeout_ms = 0
+
 # ─── 検知のデバウンス ─────────────────────────────────────────────────
 # エディタや同期ソフトは 1 回の保存で何度もイベントを出します。最後の
 # イベントから debounce_ms だけ静かになったら「確定」として 1 回だけ処理します。
@@ -126,11 +139,15 @@ verify_integrity   = true
 #                                  # Linux:   bash / sh / pwsh
 # command     = "echo {FullName}"
 # working_dir = ""
+# wait        = true               # 終了を待って終了コードを確認する
+# timeout_ms  = 30000              # 待つ上限。0 は無制限
 
 # [[rules.actions]]                # ─── execute ────────────────────────────
 # type        = "execute"
 # program     = 'C:\tool\app.exe'
 # args        = ["{FullName}"]
+# wait        = true               # 終了を待って終了コードを確認する
+# timeout_ms  = 30000              # 待つ上限。0 は無制限
 # working_dir = ""
 "#;
 
