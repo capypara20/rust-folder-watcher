@@ -3,7 +3,7 @@ pub mod common;
 pub mod copy;
 pub mod execute;
 pub mod r#move;
-mod spawn;
+pub(crate) mod spawn;
 
 use std::path::Path;
 use std::sync::Arc;

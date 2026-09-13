@@ -69,3 +69,64 @@ async fn cmd_spawns_with_placeholder_and_working_dir() {
     let action = make_action("cmd", "echo {Name}", dir.path().to_str().unwrap());
     assert!(execute(&action, &ctx, &make_sink(), (1, 1)).await.is_ok());
 }
+
+// =========================================================
+// cmd.exe のクオート規則（Issue #76）
+// =========================================================
+
+/// cmd はコマンド全体をダブルクオートで囲んだ Raw 引数として渡すこと。
+///
+/// cmd.exe は argv 規則ではなく独自の規則でコマンドラインを解釈し、
+/// バックスラッシュをエスケープ文字として扱わない。argv 規則でクオートすると
+/// エスケープ用のバックスラッシュが文字として残り、コマンドが壊れる。
+#[cfg(windows)]
+#[test]
+fn cmd_passes_command_raw_and_wrapped_in_quotes() {
+    let command = r#"echo RAN > "C:\out\ran.txt""#;
+    let (program, args) = build_shell_command("cmd", command).unwrap();
+
+    assert_eq!(program, "cmd.exe");
+    assert_eq!(args.len(), 2);
+    assert_eq!(args[0], SpawnArg::Quoted("/C".to_string()));
+    assert_eq!(args[1], SpawnArg::Raw(format!("\"{command}\"")));
+
+    match &args[1] {
+        SpawnArg::Raw(s) => assert!(
+            !s.contains("\\\""),
+            "cmd へ渡すコマンドにエスケープが入ってはいけない: {s}"
+        ),
+        other => panic!("Raw を期待したが {other:?} だった"),
+    }
+}
+
+/// powershell は従来どおり argv 規則でクオートすること（デグレ防止）。
+/// powershell.exe は argv 規則で引数を解釈するので、Raw にしてはいけない。
+#[cfg(windows)]
+#[test]
+fn powershell_args_stay_quoted() {
+    let (program, args) = build_shell_command("powershell", "echo hi").unwrap();
+    assert_eq!(program, "powershell.exe");
+    assert_eq!(
+        args,
+        vec![
+            SpawnArg::Quoted("-NoProfile".to_string()),
+            SpawnArg::Quoted("-Command".to_string()),
+            SpawnArg::Quoted("echo hi".to_string()),
+        ]
+    );
+}
+
+/// bash / sh も argv 規則でクオートすること。
+#[cfg(not(windows))]
+#[test]
+fn bash_args_stay_quoted() {
+    let (program, args) = build_shell_command("bash", "echo hi").unwrap();
+    assert_eq!(program, "bash");
+    assert_eq!(
+        args,
+        vec![
+            SpawnArg::Quoted("-c".to_string()),
+            SpawnArg::Quoted("echo hi".to_string()),
+        ]
+    );
+}

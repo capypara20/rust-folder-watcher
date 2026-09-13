@@ -16,6 +16,7 @@ use std::ffi::c_void;
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use crate::actions::spawn::SpawnArg;
 use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, FALSE, HANDLE};
 use windows_sys::Win32::Security::{
     DuplicateTokenEx, SecurityImpersonation, TokenPrimary, TOKEN_ALL_ACCESS,
@@ -56,7 +57,7 @@ pub enum RunAsResult {
 /// アクティブなコンソールセッションのログオンユーザー権限で外部プロセスを起動する。
 pub fn spawn_as_active_user(
     program: &str,
-    args: &[String],
+    args: &[SpawnArg],
     working_dir: Option<&str>,
 ) -> RunAsResult {
     // 1. 物理コンソールに紐づくアクティブセッションを取得する。
@@ -103,7 +104,7 @@ pub fn spawn_as_active_user(
 unsafe fn create_process(
     token: HANDLE,
     program: &str,
-    args: &[String],
+    args: &[SpawnArg],
     working_dir: Option<&str>,
 ) -> RunAsResult {
     // ログオンユーザーの環境変数ブロックを作る（PATH・USERPROFILE 等の引き継ぎ）。
@@ -170,12 +171,16 @@ fn to_wide(s: &str) -> Vec<u16> {
 /// program + args から、CreateProcessAsUserW へ渡す書き換え可能な UTF-16 の
 /// コマンドラインを組み立てる。クオート規則は Windows の `CommandLineToArgvW`
 /// に合わせる（Rust 標準ライブラリの `make_command_line` と同じアルゴリズム）。
-fn build_command_line(program: &str, args: &[String]) -> Vec<u16> {
+fn build_command_line(program: &str, args: &[SpawnArg]) -> Vec<u16> {
     let mut cmd: Vec<u16> = Vec::new();
     append_quoted(program, &mut cmd);
     for arg in args {
         cmd.push(b' ' as u16);
-        append_quoted(arg, &mut cmd);
+        match arg {
+            SpawnArg::Quoted(s) => append_quoted(s, &mut cmd),
+            // クオートせずそのまま載せる（cmd.exe は独自のクオート規則を持つ）。
+            SpawnArg::Raw(s) => cmd.extend(s.encode_utf16()),
+        }
     }
     cmd.push(0); // NUL 終端
     cmd

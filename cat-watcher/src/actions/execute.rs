@@ -2,7 +2,7 @@ use crate::config::ActionConfig;
 use crate::error::AppError;
 use crate::placeholder::{expand_placeholders, PlaceholderContext};
 
-use super::spawn::spawn_detached;
+use super::spawn::{spawn_detached, SpawnArg};
 use super::ActionSink;
 
 pub async fn execute(
@@ -26,12 +26,19 @@ pub async fn execute(
         .map(|a| expand_placeholders(a, ctx))
         .collect::<Result<_, _>>()?;
 
+    // execute は args が配列なので、各要素をそのまま 1 引数として渡せばよい。
+    // クオートは argv 規則に任せる（cmd.exe のような独自規則の相手はいない）。
+    let spawn_args: Vec<SpawnArg> = expanded_args
+        .iter()
+        .map(|a| SpawnArg::Quoted(a.clone()))
+        .collect();
+
     let working_dir = action
         .working_dir
         .as_deref()
         .filter(|s| !s.is_empty());
 
-    spawn_detached(program, &expanded_args, working_dir).map_err(|e| {
+    spawn_detached(program, &spawn_args, working_dir).map_err(|e| {
         AppError::Action(format!(
             "execute: プロセス起動失敗 (program={program} args={expanded_args:?}): {e}"
         ))
