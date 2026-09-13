@@ -452,12 +452,21 @@ Windows / Linux 共通の挙動です。
 ═══ #1  2026-05-07 10:30:20  C:\data\report.csv  (Create,Modify)  actions=2 ═══
 2026-05-07 10:30:20 │ 1. copy   │ destination=D:\backup\{Date}  overwrite=false
 2026-05-07 10:30:20 │ 1. OK     │ コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
-2026-05-07 10:30:20 │ 2. log    │
-2026-05-07 10:30:20 │ 2. OK     │ 検知: report.csv
+2026-05-07 10:30:20 │ 2. cmd    │ shell=pwsh  command=& C:/tool/notify.ps1 {Name}
+2026-05-07 10:30:20 │ 2. OK     │ 起動
 ```
 
 アクションが失敗した場合は `1. WARN`（リトライ）→ `1. ERR`（最終失敗）の順に
 **アクションログにのみ** 記録されます（システムログには残りません）。
+
+**アクションが 1 つでも失敗すると、それ以降のアクションは実行されません。**
+実行されなかった分は `WARN` で明示されます。ヘッダの `actions=N` と記録された
+件数が合わないときは、途中で打ち切られたということです。
+
+```
+2026-05-07 10:30:20 │ 1. ERR    │ command: 異常終了しました (exit=1) (shell=cmd cmd=exit 1)
+2026-05-07 10:30:20 │ 1. WARN   │ 以降の 2 件を実行せず中断しました: 2.command, 3.execute
+```
 `[system_log]` の `console = false` でターミナル出力を、各ログの `enabled = false`
 で個別にファイル出力を無効にできます。
 
