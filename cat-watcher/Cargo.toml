@@ -26,6 +26,10 @@ colored = "2"
 unicode-width = "0.2"
 serde_json = { version = "1", optional = true }
 
+# 上限超過時にプロセスグループごと終了させる（killpg）ために使う。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.6"
 windows-sys = { version = "0.60", features = [
@@ -35,6 +39,7 @@ windows-sys = { version = "0.60", features = [
     "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Environment",
+    "Win32_System_JobObjects",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
 ] }

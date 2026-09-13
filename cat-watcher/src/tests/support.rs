@@ -23,6 +23,8 @@ pub(crate) fn base_action(type_: ActionType) -> ActionConfig {
         program: None,
         args: None,
         auto_create: None,
+        wait: None,
+        timeout_ms: None,
         delay_ms: None,
     }
 }

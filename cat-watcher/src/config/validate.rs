@@ -331,6 +331,16 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 					errors,
 				);
 			}
+			// wait / timeout_ms は外部プロセスを起動する command / execute 専用。
+			// copy / move に書かれていても効かないので、黙って無視せずエラーにする。
+			// （設定読み込み時に copy / move へは焼き込んでいないので、ここに値が
+			//   入っているのは利用者が書いた場合だけ）
+			if action.wait.is_some() {
+				errors.push(format!("監視ルール名 {} のアクションの wait は type が Command / Execute のときだけ指定できます（Copy / Move では外部プロセスを起動しません）", rule_name));
+			}
+			if action.timeout_ms.is_some() {
+				errors.push(format!("監視ルール名 {} のアクションの timeout_ms は type が Command / Execute のときだけ指定できます（Copy / Move では外部プロセスを起動しません）", rule_name));
+			}
 		}
 
 		ActionType::Command => {

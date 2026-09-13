@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use super::model::{GlobalConfig, RulesConfig};
+use super::types::ActionType;
 use crate::error::AppError;
 
 /// 設定ファイルを既定の場所から探す。
@@ -67,10 +68,23 @@ pub fn load_global_config(path: &Path) -> Result<GlobalConfig, AppError> {
 /// 優先し、無ければ global の値を入れる。
 pub fn apply_global_defaults(global: &GlobalConfig, rules: &mut RulesConfig) {
 	let default_auto_create = global.auto_create_destination();
+	let default_wait = global.wait_for_process();
+	let default_timeout_ms = global.process_timeout_ms();
 	for rule in &mut rules.rules {
 		for action in &mut rule.actions {
 			if action.auto_create.is_none() {
 				action.auto_create = Some(default_auto_create);
+			}
+			// wait / timeout_ms は外部プロセスを起動するアクション専用の設定。
+			// copy / move には焼き込まないでおく。そうしておけば「copy に wait を
+			// 書いてしまった」ケースをバリデーションで検出できる。
+			if matches!(action.type_, ActionType::Command | ActionType::Execute) {
+				if action.wait.is_none() {
+					action.wait = Some(default_wait);
+				}
+				if action.timeout_ms.is_none() {
+					action.timeout_ms = default_timeout_ms;
+				}
 			}
 		}
 	}

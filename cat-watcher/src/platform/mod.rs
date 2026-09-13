@@ -2,8 +2,10 @@
 //!
 //! - [`service`]   Windows サービス（SCM）としての常駐起動。
 //! - [`win_runas`] サービス（SYSTEM 権限）からログオンユーザー権限で外部プロセスを起動する。
+//! - [`win_job`]   起動した外部プロセスとその子孫をまとめて終了できるようにする。
 
 pub mod service;
+pub mod win_job;
 pub mod win_runas;
 
 /// 今このプロセスが動いているアカウント名（`DOMAIN\user` 形式）を返す。

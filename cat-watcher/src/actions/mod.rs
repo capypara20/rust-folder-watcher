@@ -3,7 +3,7 @@ pub mod common;
 pub mod copy;
 pub mod execute;
 pub mod r#move;
-mod spawn;
+pub(crate) mod spawn;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -68,6 +68,43 @@ impl ActionSink {
     }
 }
 
+/// ログに出すアクション種別の表記。
+fn action_type_label(type_: &ActionType) -> &'static str {
+    match type_ {
+        ActionType::Copy => "copy",
+        ActionType::Move => "move",
+        ActionType::Command => "command",
+        ActionType::Execute => "execute",
+    }
+}
+
+/// 中断によって実行されなかったアクションの一覧を、ログ用の 1 行にまとめる。
+///
+/// `failed_index` は失敗したアクションの番号（1 始まり）。
+/// 残りが無ければ `None`（中断した旨を出す必要がない）。
+fn skipped_summary(actions: &[ActionConfig], failed_index: usize) -> Option<String> {
+    let remaining = actions.get(failed_index..).unwrap_or(&[]);
+    if remaining.is_empty() {
+        return None;
+    }
+    let list = remaining
+        .iter()
+        .enumerate()
+        .map(|(offset, a)| {
+            format!(
+                "{}.{}",
+                failed_index + 1 + offset,
+                action_type_label(&a.type_)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "以降の {} 件を実行せず中断しました: {list}",
+        remaining.len()
+    ))
+}
+
 /// 1 つの監視イベントに対して、ルールの actions を順に実行する。
 /// アクション間で PlaceholderContext を保持し、copy/move 完了後に {Destination} を更新する。
 ///
@@ -102,21 +139,21 @@ pub async fn execute_chain(
                 let dest_str = action.destination.as_deref().unwrap_or("");
                 let overwrite = action.overwrite.unwrap_or(false);
                 let detail = format!("destination={dest_str}  overwrite={overwrite}");
-                sink.action_start(index, total, "copy", detail);
+                sink.action_start(index, total, action_type_label(&action.type_), detail);
                 copy::execute(action, src, &ctx, retry, &sink, step).await
             }
             ActionType::Move => {
                 let dest_str = action.destination.as_deref().unwrap_or("");
                 let overwrite = action.overwrite.unwrap_or(false);
                 let detail = format!("destination={dest_str}  overwrite={overwrite}");
-                sink.action_start(index, total, "move", detail);
+                sink.action_start(index, total, action_type_label(&action.type_), detail);
                 r#move::execute(action, src, &ctx, retry, &sink, step).await
             }
             ActionType::Command => {
                 let shell = action.shell.as_deref().unwrap_or("");
                 let cmd = action.command.as_deref().unwrap_or("");
                 let detail = format!("shell={shell}  command={cmd}");
-                sink.action_start(index, total, "command", detail);
+                sink.action_start(index, total, action_type_label(&action.type_), detail);
                 command::execute(action, &ctx, &sink, step).await.map(|_| None)
             }
             ActionType::Execute => {
@@ -124,7 +161,7 @@ pub async fn execute_chain(
                 let args = action.args.as_deref().unwrap_or(&[]);
                 let args_str = args.join(" ");
                 let detail = format!("{program} {args_str}").trim_end().to_string();
-                sink.action_start(index, total, "execute", detail);
+                sink.action_start(index, total, action_type_label(&action.type_), detail);
                 execute::execute(action, &ctx, &sink, step).await.map(|_| None)
             }
         };
@@ -137,9 +174,19 @@ pub async fn execute_chain(
             Err(e) => {
                 // アクション失敗は action ログ＋ターミナルに記録（システムログには残さない）
                 sink.err(index, total, format!("{e}"));
+                // ここで打ち切るので残りのアクションは実行されない。何も出さないと
+                // 「ヘッダに actions=10 と書いてあるのにログが 1 件しか無い」状態になり、
+                // 2 件目以降が動いていないことに気づけない。
+                if let Some(msg) = skipped_summary(actions, index) {
+                    sink.warn(index, total, msg);
+                }
                 return Err(e);
             }
         }
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/actions_chain.rs"]
+mod tests;

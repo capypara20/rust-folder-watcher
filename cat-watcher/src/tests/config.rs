@@ -213,6 +213,7 @@ fn make_global(dir: &str, file_name: &str) -> GlobalConfig {
 		},
 		dashboard: None,
 		startup_scan: None,
+		action: None,
 		destination: None,
 		detect: None,
 		service: None,
