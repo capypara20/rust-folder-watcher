@@ -621,7 +621,7 @@ sc delete cat-watcher
 [2026-09-15 08:28:49] サービス起動に失敗しました
   --global : C:\catwatcher\global.toml
   --rules  : C:\catwatcher\rules.toml
-  実行アカウント : NT AUTHORITY\SYSTEM
+  実行アカウント : NT AUTHORITY\SYSTEM (S-1-5-18)
   エラー : TOML パースエラー: TOML parse error at line 6, column 25
     |
   6 | path             = "C:\catwatcher\watch"
@@ -645,6 +645,25 @@ sc query cat-watcher
 | `10` | 設定ファイルの読み込み・パース・バリデーションに失敗 |
 | `11` | ログの初期化に失敗（出力先が作れない等） |
 | `12` | 監視の実行中に致命的エラー |
+**実行アカウントの確認**:
+
+起動時にシステムログへ実行アカウントを出します。SID も併記するので、
+名前がローカライズされていても種別を判別できます。
+
+```
+2026-09-15 08:20:47 │ INFO  │ Windowsサービスとして起動しました  実行アカウント=NT AUTHORITY\SYSTEM (S-1-5-18)
+```
+
+| SID | アカウント |
+|---|---|
+| `S-1-5-18` | LocalSystem（`sc create` の既定） |
+| `S-1-5-19` | LocalService |
+| `S-1-5-20` | NetworkService |
+| `S-1-5-21-...` | ローカル／ドメインのユーザー |
+
+「ネットワーク共有が見えない」「PowerShell が SYSTEM で動く」といった症状は、
+ほぼ実行アカウントの問題です。`sc config obj=` で変えたつもりが変わっていない、
+という食い違いもここで気づけます。
 
 **外部プロセス（command / execute）の実行権限**:
 
