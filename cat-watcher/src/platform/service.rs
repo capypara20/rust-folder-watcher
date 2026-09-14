@@ -204,8 +204,8 @@ fn run_watcher(
     stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), AppError> {
     // 設定を読む前に StartPending を報告する。ここで Running と言ってしまうと、
-    // 設定エラーで死んでも SCM には「起動成功 → 勝手に停止」に見えてしまい、
-    // sc start も 0 を返してしまう（＝失敗に気づけない）。
+    // 設定エラーで死んでも SCM 上は「起動成功 → 勝手に停止」になり、
+    // SERVICE_EXIT_CODE にも失敗が残らない（＝どこにも手がかりが無くなる）。
     set_start_pending(&status_handle, 1);
 
     let args = match parse_service_args() {
@@ -254,8 +254,12 @@ fn run_watcher_inner(
         let log = Arc::new(log);
 
         // 設定が読めてログも開けた。ここで初めて Running を報告する。
-        // これより前に失敗した場合は StartPending のまま Stopped へ落ちるので、
-        // SCM が起動失敗として扱い、sc start も非ゼロを返す。
+        // これより前に失敗した場合は StartPending のまま Stopped へ落ちるため、
+        // SCM が起動失敗として扱い、sc query の SERVICE_EXIT_CODE に理由が残る。
+        //
+        // なお `sc start` は START_PENDING を確認した時点で戻るので、その終了コードは
+        // 起動の成否を表さない（修正の前後どちらでも 0 になる）。成否を待って
+        // 判定したい場合は PowerShell の Start-Service を使う。
         status_handle
             .set_service_status(ServiceStatus {
                 service_type: ServiceType::OWN_PROCESS,
