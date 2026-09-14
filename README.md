@@ -543,6 +543,40 @@ sc delete cat-watcher
 - `global.toml` の `[system_log]`（`enabled` / `dir`）を正しく設定しておく必要があります
 - 通常の CLI 起動（`cat-watcher -g ... -r ...`）の動作は変わりません
 
+**サービスが起動しない場合**:
+
+設定ファイルにエラーがあると、サービスは起動に失敗します。原因は
+**実行ファイルと同じフォルダの `cat-watcher-startup-error.log`** に記録されます。
+
+```
+[2026-09-15 08:28:49] サービス起動に失敗しました
+  --global : C:\catwatcher\global.toml
+  --rules  : C:\catwatcher\rules.toml
+  実行アカウント : NT AUTHORITY\SYSTEM
+  エラー : TOML パースエラー: TOML parse error at line 6, column 25
+    |
+  6 | path             = "C:\catwatcher\watch"
+    |                         ^
+  invalid escape sequence
+```
+
+- 設定が読めない段階の失敗は通常のログ設定自体が使えないため、**設定に依存しない
+  固定パス**へ書き出します。実行ファイル横に書けない場合はカレントディレクトリ、
+  それも無理なら `TEMP` を試します
+- 起動**後**の実行時エラーはこのファイルではなく、通常のシステムログに出ます
+
+失敗の種類は `sc query` の終了コードからも分かります。
+
+```cmd
+sc query cat-watcher
+```
+
+| 終了コード | 意味 |
+|---|---|
+| `10` | 設定ファイルの読み込み・パース・バリデーションに失敗 |
+| `11` | ログの初期化に失敗（出力先が作れない等） |
+| `12` | 監視の実行中に致命的エラー |
+
 **外部プロセス（command / execute）の実行権限**:
 
 サービスは既定で **LocalSystem（SYSTEM）アカウント** で実行されるため、そのままだと
