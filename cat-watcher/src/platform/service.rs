@@ -1,7 +1,8 @@
 #![cfg(windows)]
 
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -44,7 +45,95 @@ fn is_not_service_context(e: &windows_service::Error) -> bool {
 
 fn service_main(arguments: Vec<OsString>) {
     if let Err(e) = run_service(&arguments) {
+        // サービスプロセスには標準エラー出力の行き先が無いため、これは
+        // どこにも表示されない。実際の記録は run_watcher 側の
+        // write_startup_error_log が行う。ここは CLI から誤って
+        // サービス経路に入った場合の保険。
         eprintln!("サービス実行エラー: {e}");
+    }
+}
+
+/// サービスの終了コード。`sc query` から見えるので、原因の種類が区別できるようにする。
+///
+/// 従来は常に `Win32(1)`（= `ERROR_INVALID_FUNCTION`「ファンクションが間違っています」）
+/// で、イベントログを見ても何も分からなかった。
+mod exit_code {
+    /// 設定ファイルの読み込み・パース・バリデーションに失敗した。
+    pub const CONFIG: u32 = 10;
+    /// ログの初期化に失敗した（出力先が作れない等）。
+    pub const LOG: u32 = 11;
+    /// 監視の実行中に致命的エラーが起きた。
+    pub const RUNTIME: u32 = 12;
+}
+
+/// 起動失敗の内容を書き出すファイル名。
+const STARTUP_ERROR_LOG: &str = "cat-watcher-startup-error.log";
+
+/// 起動失敗の記録先の候補。前から順に試し、1 つ書けたら終わりにする。
+///
+/// 実行ファイル横が第一候補。`Program Files` 配下など書き込めない場合の保険として
+/// カレントディレクトリと TEMP も見る。
+fn startup_error_log_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            paths.push(dir.join(STARTUP_ERROR_LOG));
+        }
+    }
+    if let Ok(dir) = std::env::current_dir() {
+        paths.push(dir.join(STARTUP_ERROR_LOG));
+    }
+    if let Some(tmp) = std::env::var_os("TEMP") {
+        paths.push(PathBuf::from(tmp).join(STARTUP_ERROR_LOG));
+    }
+    paths
+}
+
+/// 設定が読めなくても必ず書ける場所へ、起動失敗の内容を残す。
+///
+/// サービスは標準エラー出力の行き先が無く、設定エラーのときはログ設定自体が
+/// 読めていないためログファイルも作られない。イベントログには
+/// 「ファンクションが間違っています」しか出ないので調査に使えない。
+/// そこで固定名のファイルへ追記する。
+fn write_startup_error_log(args: Option<&ServiceArgs>, err: &AppError) {
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let mut body = format!("[{ts}] サービス起動に失敗しました\n");
+    match args {
+        Some(a) => {
+            body.push_str(&format!("  --global : {}\n", a.global.display()));
+            body.push_str(&format!("  --rules  : {}\n", a.rules.display()));
+        }
+        None => body.push_str("  引数の解析に失敗したため、設定ファイルのパスは不明です\n"),
+    }
+    body.push_str(&format!(
+        "  実行アカウント : {}\n",
+        super::current_account()
+    ));
+    body.push_str(&format!("  エラー : {err}\n\n"));
+
+    for path in startup_error_log_paths() {
+        if append_text(&path, &body).is_ok() {
+            return;
+        }
+    }
+}
+
+/// ファイルへ追記する。親ディレクトリは作らない（固定の既存フォルダが前提）。
+fn append_text(path: &Path, body: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)?;
+    f.write_all(body.as_bytes())
+}
+
+/// `AppError` から終了コードを決める。
+fn exit_code_for(err: &AppError) -> u32 {
+    match err {
+        AppError::Config(_) | AppError::Validation(_) | AppError::TomlParse(_) => exit_code::CONFIG,
+        AppError::Io(_) => exit_code::LOG,
+        _ => exit_code::RUNTIME,
     }
 }
 
@@ -78,12 +167,16 @@ fn run_service(arguments: &[OsString]) -> Result<(), AppError> {
 
     let result = run_watcher(status_handle, stop_rx);
 
-    let exit_code = if result.is_ok() { 0 } else { 1 };
+    // 失敗の種類が `sc query` から区別できるように、固有の終了コードを返す。
+    let exit_code = match &result {
+        Ok(_) => ServiceExitCode::Win32(0),
+        Err(e) => ServiceExitCode::ServiceSpecific(exit_code_for(e)),
+    };
     let _ = status_handle.set_service_status(ServiceStatus {
         service_type: ServiceType::OWN_PROCESS,
         current_state: ServiceState::Stopped,
         controls_accepted: ServiceControlAccept::empty(),
-        exit_code: ServiceExitCode::Win32(exit_code),
+        exit_code,
         checkpoint: 0,
         wait_hint: Duration::default(),
         process_id: None,
@@ -92,30 +185,63 @@ fn run_service(arguments: &[OsString]) -> Result<(), AppError> {
     result
 }
 
+/// 起動途中であることを SCM に伝える。`checkpoint` を進めると「進行中」と見なされ、
+/// `wait_hint` の間は待ってもらえる。
+fn set_start_pending(status_handle: &ServiceStatusHandle, checkpoint: u32) {
+    let _ = status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::StartPending,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint,
+        wait_hint: Duration::from_secs(30),
+        process_id: None,
+    });
+}
+
 fn run_watcher(
     status_handle: ServiceStatusHandle,
     stop_rx: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), AppError> {
-    let args = parse_service_args()?;
+    // 設定を読む前に StartPending を報告する。ここで Running と言ってしまうと、
+    // 設定エラーで死んでも SCM 上は「起動成功 → 勝手に停止」になり、
+    // SERVICE_EXIT_CODE にも失敗が残らない（＝どこにも手がかりが無くなる）。
+    set_start_pending(&status_handle, 1);
 
-    status_handle
-        .set_service_status(ServiceStatus {
-            service_type: ServiceType::OWN_PROCESS,
-            current_state: ServiceState::Running,
-            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
-            exit_code: ServiceExitCode::Win32(0),
-            checkpoint: 0,
-            wait_hint: Duration::default(),
-            process_id: None,
-        })
-        .map_err(|e| AppError::Config(format!("サービス状態設定失敗: {e}")))?;
+    let args = match parse_service_args() {
+        Ok(args) => args,
+        Err(e) => {
+            write_startup_error_log(None, &e);
+            return Err(e);
+        }
+    };
 
+    // Running を報告できたかどうか。起動途中で失敗した場合だけ、固定パスへ
+    // エラーを残す（起動後の実行時エラーは通常のシステムログに出る）。
+    let started = AtomicBool::new(false);
+    let result = run_watcher_inner(&status_handle, stop_rx, &args, &started);
+    if let Err(e) = &result {
+        if !started.load(Ordering::SeqCst) {
+            write_startup_error_log(Some(&args), e);
+        }
+    }
+    result
+}
+
+fn run_watcher_inner(
+    status_handle: &ServiceStatusHandle,
+    stop_rx: tokio::sync::oneshot::Receiver<()>,
+    args: &ServiceArgs,
+    started: &AtomicBool,
+) -> Result<(), AppError> {
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
         .map_err(|e| AppError::Config(format!("tokioランタイム作成失敗: {e}")))?;
 
     rt.block_on(async {
+        set_start_pending(status_handle, 2);
+
         let global_config = config::load_global_config(&args.global)?;
         let mut rules_conf = config::load_rules_config(&args.rules)?;
         config::apply_global_defaults(&global_config, &mut rules_conf);
@@ -126,6 +252,26 @@ fn run_watcher(
         // サービスモードではコンソール出力を無効化する（allow_console=false）
         let (log, log_handle) = Logger::new_system(&global_config.system_log, false)?;
         let log = Arc::new(log);
+
+        // 設定が読めてログも開けた。ここで初めて Running を報告する。
+        // これより前に失敗した場合は StartPending のまま Stopped へ落ちるため、
+        // SCM が起動失敗として扱い、sc query の SERVICE_EXIT_CODE に理由が残る。
+        //
+        // なお `sc start` は START_PENDING を確認した時点で戻るので、その終了コードは
+        // 起動の成否を表さない（修正の前後どちらでも 0 になる）。成否を待って
+        // 判定したい場合は PowerShell の Start-Service を使う。
+        status_handle
+            .set_service_status(ServiceStatus {
+                service_type: ServiceType::OWN_PROCESS,
+                current_state: ServiceState::Running,
+                controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+                exit_code: ServiceExitCode::Win32(0),
+                checkpoint: 0,
+                wait_hint: Duration::default(),
+                process_id: None,
+            })
+            .map_err(|e| AppError::Config(format!("サービス状態設定失敗: {e}")))?;
+        started.store(true, Ordering::SeqCst);
 
         // 実行アカウントを最初に出す。ネットワーク共有が見えない／外部プロセスが
         // SYSTEM で動く、といった相談はここを確認するのが出発点になる。
@@ -219,3 +365,7 @@ fn parse_service_args() -> Result<ServiceArgs, AppError> {
         rules: config::resolve_config_path(rules, "rules.toml", "--rules")?,
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/service.rs"]
+mod tests;
