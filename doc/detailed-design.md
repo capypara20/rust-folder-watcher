@@ -118,24 +118,25 @@ Logger（tracing / JSON 構造化ログ → ファイル出力）
 
 ### 3.2 `global.toml`
 
-```toml
-[global]
-log_level = "info"
-log_file = "./logs/watcher.log"
-log_rotation = "daily"
-retry_count = 3
-retry_interval_ms = 1000
-dry_run = false
-```
+> **この節は v1.3.0 のログ設定刷新で全面的に変わりました。**
+> 旧 `[global]` セクション（`log_level` / `log_file` / `retry_count` / `dry_run` など）は
+> **廃止**されています。未知のキーがあると起動時にエラーで停止します。
+> 現行の項目と既定値は `README.md` の「設定リファレンス」を参照してください。
 
-| キー | 型 | 説明 |
-|------|-----|------|
-| `log_level` | string | `trace` / `debug` / `info` / `warn` / `error` |
-| `log_file` | string | ログファイルパス |
-| `log_rotation` | string | `daily`（日次ローテーション）/ `never`（ローテーションなし） |
-| `retry_count` | u32 | ファイル I/O エラー時のリトライ回数 |
-| `retry_interval_ms` | u64 | リトライ間隔（ミリ秒） |
-| `dry_run` | bool | `true` でアクションを実行せずログのみ出力 |
+セクション単位の構成になっています。
+
+| セクション | 省略 | 役割 |
+|---|---|---|
+| `[retry]` | 不可 | `copy` / `move` 失敗時の再試行回数と間隔 |
+| `[system_log]` | 不可 | システムログ（全体 1 本）の出力先・レベル・コンソール出力 |
+| `[startup_scan]` | 可（既定 ON） | 起動時に監視フォルダを 1 度走査し、既存ファイルを拾うか |
+| `[destination]` | 可（既定 ON） | `copy` / `move` の宛先フォルダを自動作成するか |
+| `[detect]` | 可 | デバウンス時間と確定チェック間隔 |
+| `[dashboard]` | 可（既定 OFF） | ブラウザ向けライブビューの有効化と待ち受けアドレス |
+| `[service]` | 可 | Windows サービス時に外部プロセスをログオンユーザー権限で起動するか |
+
+検知ログ・アクションログの出力先は `global.toml` ではなく、`rules.toml` の
+`[rules.log.detect]` / `[rules.log.action]` でルールごとに指定します。
 
 ### 3.3 `rules.toml`
 
@@ -488,7 +489,7 @@ command = "echo {{result}}: {Name}"
 | フォルダコピー | `target = "directory"` の場合、フォルダの中身ごとすべて再帰コピー |
 | 異ボリューム | OS がコピーを処理するため問題なし |
 | destination 不在 | 起動時バリデーションでエラー。ただし `preserve_structure = true` の場合はルートディレクトリが存在すれば OK（中間ディレクトリは自動作成） |
-| リトライ | 「コピー＋完全性検証」を 1 つのリトライ単位とする。I/O エラー・ハッシュ不一致のいずれも同じ `retry_count` を消費する。不一致時は宛先ファイルを削除してからリトライする（`overwrite = false` でもリトライ可能にするため）。リトライごとに WARN ログ、最終失敗時に ERROR ログを出力 |
+| リトライ | 「コピー＋完全性検証」を 1 つのリトライ単位とする。I/O エラー・ハッシュ不一致のいずれも同じ `[retry] count` を消費する。不一致時は宛先ファイルを削除してからリトライする（`overwrite = false` でもリトライ可能にするため）。リトライごとに WARN ログ、最終失敗時に ERROR ログを出力 |
 | 完全性検証 | `verify_integrity = true` の場合、コピー後にソースと宛先の BLAKE3 ハッシュ値を比較する。最終的にハッシュ不一致で失敗した場合は不正な宛先ファイルを削除する |
 
 ### 10.2 move（移動）
@@ -544,7 +545,7 @@ command = "echo {{result}}: {Name}"
 | 項目 | 仕様 |
 |------|------|
 | 対象 | ファイル I/O エラーおよびハッシュ不一致（`verify_integrity = true` 時） |
-| 設定 | `global.toml` の `retry_count` / `retry_interval_ms` |
+| 設定 | `global.toml` の `[retry]` セクション（`count` / `interval_ms`） |
 | 適用範囲 | `copy` / `move` のファイル操作時。「コピー（または移動）＋完全性検証」を **1 つの操作単位**としてリトライする。I/O エラーとハッシュ不一致は同じカウンタを消費する |
 | 適用外 | `command` / `execute`（fire-and-forget）。設定エラー等の致命的エラー |
 | 不一致時の処理 | ハッシュ不一致でリトライする前に宛先ファイルを削除する（`overwrite = false` でもリトライ可能にするため） |
@@ -613,7 +614,6 @@ loop:
 
 - `blake3` クレートの `Hasher` を使用し、ストリーミング（チャンク単位）でハッシュを計算する
 - バッファサイズはデフォルト 64 KiB（`blake3` クレートの推奨値に準拠）
-- `dry_run = true` の場合はハッシュ検証をスキップする
 
 ---
 
@@ -699,7 +699,7 @@ JSON 構造化ログ。1 行 1 JSON オブジェクト。
 
 ### 12.5 出力先
 
-- **ファイル出力のみ**（`global.toml` の `log_file` パス）
+- **ファイル出力のみ**（`global.toml` の `[system_log]` の `dir` / `file_name`）
 - コンソール出力は行わない
 
 ---
@@ -753,7 +753,7 @@ JSON 構造化ログ。1 行 1 JSON オブジェクト。
 ### 14.2 ファイルロック
 
 - 他プロセスが書き込み中のファイルは開けない（`SHARING_VIOLATION`）
-- リトライ機構（`retry_count` / `retry_interval_ms`）で対処
+- リトライ機構（`[retry]` の `count` / `interval_ms`）で対処
 
 ### 14.3 文字コード
 

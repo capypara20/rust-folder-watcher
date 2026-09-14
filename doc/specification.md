@@ -65,30 +65,60 @@ logs/
 
 ## 4. 設定ファイルの書き方
 
-設定ファイルは **2 ファイル構成**です。すべての項目に省略やデフォルト値はありません。必ず全項目を明示的に記述してください。
+設定ファイルは **2 ファイル構成**です。省略できるセクションと既定値があります（各項目の「省略可」表記を参照）。
 
 ### 4.1 global.toml（グローバル設定）
 
-手動で編集します。
+手動で編集します。`cat-watcher --init global` で雛形を出せます。
+
+> **v1.3.0 でログ設定は破壊的に変更されました。** 旧 `[global]` セクション
+> （`log_level` / `log_dir` / `log_to_file` / `dry_run` など）は廃止されています。
+> 未知のキーがあると起動時にエラーで停止します。
 
 ```toml
-[global]
-log_level = "info"              # ログレベル: trace / debug / info / warn / error
-log_file = "./logs/watcher.log" # ログ出力先パス
-log_rotation = "daily"          # ログローテーション: daily（日次） / never（なし）
-retry_count = 3                 # アクション失敗時のリトライ回数
-retry_interval_ms = 1000        # リトライ間隔（ミリ秒）
-dry_run = false                 # true にするとアクションを実行せずログのみ出力
+# リトライ設定（copy / move 失敗時の再試行）
+[retry]
+count       = 3
+interval_ms = 1000
+
+# システムログ（プログラム全体の起動日誌・全体で 1 本）
+[system_log]
+enabled   = true
+dir       = 'C:\logs'
+file_name = "system_{Date}.log"
+rotation  = "daily"
+level     = "info"
+console   = true
+
+# 起動時スキャン（省略可・既定 ON）
+[startup_scan]
+enabled = true
+
+# copy / move の宛先フォルダの自動作成（省略可・既定 ON）
+[destination]
+auto_create = true
+
+# 検知のデバウンス（省略可）
+[detect]
+debounce_ms      = 500
+poll_interval_ms = 100
+
+# ダッシュボード（省略可・既定 OFF）
+[dashboard]
+enabled = false
+bind    = "127.0.0.1:8080"
+history = 200
+
+# Windows サービス設定（省略可・CLI 起動では参照されない）
+[service]
+run_as_logged_in_user = true
 ```
 
-| 項目 | 説明 |
-|------|------|
-| `log_level` | 出力するログの最低レベル。`trace` が最も詳細、`error` が最も簡潔 |
-| `log_file` | ログファイルのパス。相対パスの場合は watcher.exe の実行ディレクトリ基準 |
-| `log_rotation` | `daily` を推奨。日付ごとにファイルが分割されます |
-| `retry_count` | ファイルが他プロセスにロックされている場合等のリトライ回数 |
-| `retry_interval_ms` | リトライの待機間隔。1000 = 1秒 |
-| `dry_run` | テスト時に `true` に設定すると、実際のコピー・移動・コマンド実行を行いません |
+検知ログ・アクションログの出力先は、この `global.toml` ではなく
+`rules.toml` の `[rules.log]` 側でルールごとに指定します。
+
+各項目の詳しい説明は `README.md` の「設定リファレンス」を参照してください。
+
 
 ### 4.2 rules.toml（監視ルール定義）
 
@@ -159,7 +189,7 @@ verify_integrity = true            # BLAKE3 ハッシュ値比較でコピー/�
 type = "command"
 shell = "powershell"              # cmd / powershell / pwsh
 command = "Write-Host 'Detected: {Name}'"
-working_dir = "C:/scripts"       # 省略可
+working_dir = "C:/scripts"       # 必須（カレントを使う場合は空文字 ""）
 ```
 
 **execute（外部プロセス直接起動）:**
@@ -168,7 +198,7 @@ working_dir = "C:/scripts"       # 省略可
 type = "execute"
 program = "C:/tools/processor.exe"
 args = ["--input", "{FullName}", "--mode", "auto"]
-working_dir = "C:/tools"         # 省略可
+working_dir = "C:/tools"         # 必須（カレントを使う場合は空文字 ""）
 ```
 
 #### アクションチェーン
