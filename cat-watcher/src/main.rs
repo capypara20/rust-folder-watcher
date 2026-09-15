@@ -12,6 +12,7 @@ mod config;
 #[cfg(feature = "dashboard")]
 mod dashboard;
 mod error;
+mod exe_path;
 mod logger;
 #[cfg(windows)]
 mod platform;
