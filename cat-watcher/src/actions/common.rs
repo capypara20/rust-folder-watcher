@@ -43,13 +43,13 @@ pub async fn ensure_dest_dir(dir: &Path, auto_create: bool, label: &str) -> Resu
     if !auto_create {
         return Err(AppError::Action(format!(
             "{label}フォルダが存在しません（auto_create = false のため自動作成しません）: {}",
-            dir.display()
+            crate::path_fmt::for_log(dir)
         )));
     }
     tokio::fs::create_dir_all(dir).await.map_err(|e| {
         AppError::Action(format!(
             "{label}フォルダの作成に失敗 ({}): {}",
-            dir.display(),
+            crate::path_fmt::for_log(dir),
             e
         ))
     })
@@ -68,10 +68,10 @@ pub async fn hash_file_blake3(path: &Path) -> Result<blake3::Hash, AppError> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<blake3::Hash, AppError> {
         let mut file = std::fs::File::open(&path)
-            .map_err(|e| AppError::FileHash(format!("ファイルオープン失敗 ({}): {}", path.display(), e)))?;
+            .map_err(|e| AppError::FileHash(format!("ファイルオープン失敗 ({}): {}", crate::path_fmt::for_log(&path), e)))?;
         let mut hasher = blake3::Hasher::new();
         std::io::copy(&mut file, &mut hasher)
-            .map_err(|e| AppError::FileHash(format!("読み込み失敗 ({}): {}", path.display(), e)))?;
+            .map_err(|e| AppError::FileHash(format!("読み込み失敗 ({}): {}", crate::path_fmt::for_log(&path), e)))?;
         Ok(hasher.finalize())
     })
     .await
@@ -92,8 +92,8 @@ pub async fn try_copy_once(src: &Path, dest: &Path, verify_integrity: bool) -> R
         if src_hash != dest_hash {
             return Err(AppError::FileHash(format!(
                 "BLAKE3 不一致: src={} dest={}",
-                src.display(),
-                dest.display()
+                crate::path_fmt::for_log(src),
+                crate::path_fmt::for_log(dest)
             )));
         }
         Ok(Some(src_hash))
@@ -181,7 +181,7 @@ pub(super) fn resolve_folder_dest(
 /// `base` からの相対パスを取り出す。取れない場合はアクションエラーにする。
 pub(super) fn relative_to<'a>(path: &'a Path, base: &Path) -> Result<&'a Path, AppError> {
     path.strip_prefix(base)
-        .map_err(|e| AppError::Action(format!("相対パスの解決に失敗 ({}): {}", path.display(), e)))
+        .map_err(|e| AppError::Action(format!("相対パスの解決に失敗 ({}): {}", crate::path_fmt::for_log(path), e)))
 }
 
 #[cfg(test)]

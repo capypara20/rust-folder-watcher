@@ -136,14 +136,18 @@ pub async fn execute_chain(
 
         let result: Result<Option<std::path::PathBuf>, AppError> = match action.type_ {
             ActionType::Copy => {
-                let dest_str = action.destination.as_deref().unwrap_or("");
+                // 設定に書かれた文字列をそのまま出すと、他のログ行（OS 由来の区切り）と
+                // 表記が食い違う。パスなので区切り文字を揃えてよい。
+                let dest_str = crate::path_fmt::normalize(action.destination.as_deref().unwrap_or(""));
                 let overwrite = action.overwrite.unwrap_or(false);
                 let detail = format!("destination={dest_str}  overwrite={overwrite}");
                 sink.action_start(index, total, action_type_label(&action.type_), detail);
                 copy::execute(action, src, &ctx, retry, &sink, step).await
             }
             ActionType::Move => {
-                let dest_str = action.destination.as_deref().unwrap_or("");
+                // 設定に書かれた文字列をそのまま出すと、他のログ行（OS 由来の区切り）と
+                // 表記が食い違う。パスなので区切り文字を揃えてよい。
+                let dest_str = crate::path_fmt::normalize(action.destination.as_deref().unwrap_or(""));
                 let overwrite = action.overwrite.unwrap_or(false);
                 let detail = format!("destination={dest_str}  overwrite={overwrite}");
                 sink.action_start(index, total, action_type_label(&action.type_), detail);
@@ -157,7 +161,8 @@ pub async fn execute_chain(
                 command::execute(action, &ctx, &sink, step).await.map(|_| None)
             }
             ActionType::Execute => {
-                let program = action.program.as_deref().unwrap_or("");
+                // program はパスなので揃える。args は値やスイッチが混ざるので触らない。
+                let program = crate::path_fmt::normalize(action.program.as_deref().unwrap_or(""));
                 let args = action.args.as_deref().unwrap_or(&[]);
                 let args_str = args.join(" ");
                 let detail = format!("{program} {args_str}").trim_end().to_string();

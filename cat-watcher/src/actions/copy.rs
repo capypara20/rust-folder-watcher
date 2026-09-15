@@ -51,7 +51,7 @@ async fn copy_one_file(
     if dest.exists() && !opts.overwrite {
         sink.warn(step.0, step.1, format!(
             "copy スキップ (overwrite=false で既存): {}",
-            dest.display()
+            crate::path_fmt::for_log(dest)
         ));
         return Ok(None);
     }
@@ -69,7 +69,7 @@ async fn copy_one_file(
                     .unwrap_or_default();
                 sink.ok(step.0, step.1, format!(
                     "コピー完了: {} → {}{}",
-                    src.display(), dest.display(), hash_suffix
+                    crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), hash_suffix
                 ));
                 return Ok(Some(dest.to_path_buf()));
             }
@@ -78,13 +78,13 @@ async fn copy_one_file(
                 if attempt < max_attempts {
                     sink.warn(step.0, step.1, format!(
                         "copy 失敗 ({}回目/{}回): {} → {}: {} (再試行)",
-                        attempt, max_attempts, src.display(), dest.display(), e
+                        attempt, max_attempts, crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), e
                     ));
                     tokio::time::sleep(interval).await;
                 } else {
                     return Err(AppError::Action(format!(
                         "copy 最終失敗 ({}回試行): {} → {}: {}",
-                        max_attempts, src.display(), dest.display(), e
+                        max_attempts, crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), e
                     )));
                 }
             }
@@ -128,7 +128,7 @@ async fn copy_directory_recursive(
     // 行が 1 本も出ず、何も起きなかったように見えてしまうため。
     sink.ok(step.0, step.1, format!(
         "フォルダのコピー完了: {} → {}（ファイル {}/{} 件・サブフォルダ {} 件）",
-        src_dir.display(), folder_dest.display(), copied, files.len(), dirs.len()
+        crate::path_fmt::for_log(src_dir), crate::path_fmt::for_log(&folder_dest), copied, files.len(), dirs.len()
     ));
 
     Ok(Some(folder_dest))
