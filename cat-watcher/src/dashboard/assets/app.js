@@ -15,6 +15,8 @@ import {
   splitTimestamp,
   el,
 } from "./render.js";
+import { initDetail, closeDetail, forgetSelectedRow } from "./detail.js";
+import { initColumns } from "./columns.js";
 
 const MAX_EVENTS = 5000; // メモリに保持する最大イベント数
 const MAX_DOM = 2000;    // DOM に残す最大行数（描画負荷対策）
@@ -97,6 +99,7 @@ function clearEmpty() {
 }
 
 function showEmpty(message) {
+  forgetSelectedRow();
   ui.log.innerHTML = "";
   ui.log.appendChild(el("div", "empty", message));
   emptyShown = true;
@@ -194,6 +197,7 @@ function rerenderLive() {
   search.rebuild(ui.search.value);
   ui.searchBox.classList.toggle("invalid", search.invalid);
 
+  forgetSelectedRow();
   ui.log.innerHTML = "";
   emptyShown = false;
   state.lastDate = null;
@@ -329,6 +333,7 @@ function renderHistory(res) {
   ui.banner.appendChild(el("span", "ttl", ttl));
   addBackButton();
 
+  forgetSelectedRow();
   ui.log.innerHTML = "";
   emptyShown = false;
   state.lastDate = null;
@@ -447,6 +452,7 @@ ui.pause.addEventListener("click", () => {
 });
 
 $("clear").addEventListener("click", () => {
+  closeDetail();
   state.events = [];
   state.pendingWhilePaused = 0;
   ui.count.textContent = "0";
@@ -462,5 +468,8 @@ $("clear").addEventListener("click", () => {
 
 // 「全展開」はグループ表示のときだけ意味がある
 $("expandAll").disabled = !state.grouping;
+
+initDetail();
+initColumns(ui.table, $("thead"));
 
 connect();
