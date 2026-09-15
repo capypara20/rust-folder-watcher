@@ -26,6 +26,7 @@
   - [サービスが起動しないときの切り分け](#サービスが起動しないときの切り分け)
   - [サービスと CLI で挙動が変わる点](#サービスと-cli-で挙動が変わる点)
 - [バリデーション](#バリデーション)
+  - [実行ファイルの存在チェック](#実行ファイルの存在チェック)
 - [開発](#開発)
 - [ドキュメント](#ドキュメント)
 
@@ -772,6 +773,41 @@ systemctl status cat-watcher
   [2] 監視ルール名 csv-backup の watch.path が存在しません: C:\data\incoming
   [3] 監視ルール名 log-processor のアクションの type が Command のとき、shell を定義してください
 ```
+
+### 実行ファイルの存在チェック
+
+`command` の `shell` と `execute` の `program` は、**起動時に実行ファイルを PATH から解決できるか確認します**。
+解決できなければ起動せずエラーにします。実行時まで持ち越すと、検知が起きるたびに同じ失敗を繰り返すことになるためです。
+
+```
+監視ルール名 backup のアクションの shell 'pwsh' の実行ファイル 'pwsh.exe' が PATH 上で見つかりません
+    対処: フルパスで指定するか、システム PATH に追加してください
+          サービスは SYSTEM のシステム PATH を使うため、ユーザー領域に入れたもの（scoop 等）は見つかりません
+    検索した PATH: 3 件
+      C:\WINDOWS\system32
+      C:\WINDOWS
+      C:\WINDOWS\System32\Wbem
+```
+
+> **サービスで動かす場合は特に注意してください。** 外部プロセスを起動するとき、
+> 実行ファイルを探すのに使われるのは **サービスの PATH（システム PATH）** です。
+> `run_as_logged_in_user = true` にしていても、子プロセスへ渡す環境変数の PATH と、
+> 実行ファイルを探すときの PATH は別物で、後者は呼び出し元（サービス）のものが使われます。
+>
+> そのため「PATH は引き継がれているのに実行ファイルが見つからない」という状態が起きます。
+> scoop など**ユーザー領域**にインストールしたツールを使う場合は、`execute` でフルパス指定してください。
+
+```toml
+# PATH に頼らずフルパスで指定する（サービスでも確実に動く）
+[[rules.actions]]
+type        = "execute"
+program     = 'C:\Users\roze\scoop\apps\pwsh\current\pwsh.exe'
+args        = ["-NoProfile", "-File", 'C:\tool\huga.ps1', "{FullName}"]
+working_dir = ""
+```
+
+- 区切り文字を含む指定（絶対パス・相対パス）は、**その場所だけ**を見ます（PATH は探しません）
+- 名前だけの指定は PATH を順に探します。Windows では `PATHEXT` の拡張子も試すため、`pwsh` のように拡張子を省略して書けます
 
 ## 開発
 

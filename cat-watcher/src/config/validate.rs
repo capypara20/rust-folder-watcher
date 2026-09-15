@@ -4,6 +4,7 @@ use std::path::Path;
 
 use globset::Glob;
 use regex::Regex;
+use crate::exe_path;
 
 use super::model::{ActionConfig, GlobalConfig, RulesConfig};
 use super::types::ActionType;
@@ -306,6 +307,31 @@ fn has_existing_ancestor(path: &Path) -> bool {
 		.any(|p| !p.as_os_str().is_empty() && p.is_dir())
 }
 
+/// 実行ファイルが実際に起動できる場所にあるかを検査する。
+///
+/// 起動時に弾かないと、検知が起きるたびに同じ失敗を繰り返すことになる。
+///
+/// **サービスとして動かす場合、exe の探索に使われるのはサービスの PATH
+/// （システム PATH）であって、ログオンユーザーの PATH ではない。**
+/// そのため「CLI では動くのにサービスでは動かない」という事故が起きる。
+/// ここで検査しておけば、その食い違いを起動時点で検出できる。
+fn collect_executable_errors(program: &str, rule_name: &str, label: &str, errors: &mut Vec<String>) {
+	match exe_path::resolve(program) {
+		exe_path::Resolved::Found(_) => {}
+		exe_path::Resolved::MissingAtPath => errors.push(format!(
+			"監視ルール名 {} のアクションの {} が存在しません: {}",
+			rule_name, label, program
+		)),
+		exe_path::Resolved::NotOnPath => errors.push(format!(
+			"監視ルール名 {} のアクションの {} '{}' が PATH 上で見つかりません\n    対処: フルパスで指定するか、システム PATH に追加してください\n          サービスは SYSTEM のシステム PATH を使うため、ユーザー領域に入れたもの（scoop 等）は見つかりません\n    検索した PATH: {}",
+			rule_name,
+			label,
+			program,
+			exe_path::search_path_summary()
+		)),
+	}
+}
+
 pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
 	match action.type_ {
 		ActionType::Copy | ActionType::Move => {
@@ -356,6 +382,9 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 						shell,
 						VALID_SHELLS.join(" / ")
 					));
+				} else if let Some(program) = crate::actions::command::shell_program(shell) {
+					// 名前が有効でも、その実行ファイルが見つからなければ起動できない。
+					collect_executable_errors(program, rule_name, &format!("shell '{shell}' の実行ファイル"), errors);
 				}
 			}
 			if action.command.is_none() {
@@ -387,10 +416,9 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 				}
 			}
 			if let Some(program) = &action.program {
-				let p = Path::new(program);
-				if p.is_absolute() && !p.exists() {
-					errors.push(format!("監視ルール名 {} のアクションの program が存在しません: {}", rule_name, program));
-				}
+				// 従来は絶対パスのときだけ存在を見ていた。名前だけの指定（"pwsh" など）は
+				// 素通りして実行時に初めて失敗していたので、PATH 解決まで確かめる。
+				collect_executable_errors(program, rule_name, "program", errors);
 			}
 		}
 

@@ -552,7 +552,9 @@ fn test_validate_action_command_required_fields() {
 #[test]
 fn test_validate_action_execute_required_fields() {
 	let mut valid = base_action(ActionType::Execute);
-	valid.program = Some("notepad.exe".to_string());
+	// program は PATH で解決できる必要がある。notepad.exe のような Windows 固有の名前を
+	// 使うと Linux の CI で落ちる（WSL は Windows の PATH を引き継ぐので気づけない）。
+	valid.program = Some(ON_PATH_PROGRAM.to_string());
 	valid.args = Some(vec![]);
 	valid.working_dir = Some("".to_string());
 	assert!(validate_action(&valid, "test").is_ok());
@@ -726,4 +728,70 @@ fn test_rules_template_is_valid_toml() {
 	assert_eq!(detect_dir, r"C:\logs", "rules[0].log.detect.dir のパスが正しく保持されていません");
 	let action_dir = val["rules"][0]["log"]["action"]["dir"].as_str().unwrap();
 	assert_eq!(action_dir, r"C:\logs", "rules[0].log.action.dir のパスが正しく保持されていません");
+}
+
+// =========================================================
+// 実行ファイルの PATH 解決（起動時チェック）
+// =========================================================
+
+/// この OS で必ず PATH 上にあるコマンド。
+#[cfg(windows)]
+const ON_PATH_PROGRAM: &str = "cmd";
+#[cfg(not(windows))]
+const ON_PATH_PROGRAM: &str = "sh";
+
+fn execute_action(program: &str) -> ActionConfig {
+	let mut a = base_action(ActionType::Execute);
+	a.program = Some(program.to_string());
+	a.args = Some(vec![]);
+	a.working_dir = Some(String::new());
+	a
+}
+
+/// PATH 上に無い program は起動時に弾くこと。
+///
+/// 素通りさせると、検知が起きるたびに同じ失敗を繰り返すことになる。
+/// 特にサービスはシステム PATH しか見ないため、ユーザー領域に入れた
+/// 実行ファイル（scoop 等）はここで検出しないと気づけない。
+#[test]
+fn execute_program_not_on_path_is_rejected() {
+	let action = execute_action("cat-watcher-definitely-not-a-real-command-xyz");
+	let err = validate_action(&action, "r").expect_err("PATH に無い program は弾くこと");
+	let msg = err.to_string();
+	assert!(msg.contains("PATH 上で見つかりません"), "{msg}");
+}
+
+/// 名前だけの指定でも、PATH 上にあれば通ること。
+#[test]
+fn execute_program_on_path_is_accepted() {
+	let action = execute_action(ON_PATH_PROGRAM);
+	assert!(
+		validate_action(&action, "r").is_ok(),
+		"PATH 上にある program を弾いてしまった"
+	);
+}
+
+/// 存在しない絶対パスは「存在しません」として弾くこと。
+/// 区切りを含む指定なので PATH は探さない。
+#[test]
+fn execute_absolute_program_that_is_missing_is_rejected() {
+	let dir = tempdir().unwrap();
+	let missing = dir.path().join("nested").join("tool.exe");
+	let action = execute_action(missing.to_str().unwrap());
+	let err = validate_action(&action, "r").expect_err("存在しない絶対パスは弾くこと");
+	assert!(err.to_string().contains("存在しません"), "{err}");
+}
+
+/// この OS で使えるシェルは、実体が見つかるので通ること。
+/// ここが落ちると、正しい設定まで起動できなくなる。
+#[test]
+fn command_shell_executable_is_found() {
+	let mut a = base_action(ActionType::Command);
+	a.shell = Some(TEST_SHELL.to_string());
+	a.command = Some("echo hi".to_string());
+	a.working_dir = Some(String::new());
+	assert!(
+		validate_action(&a, "r").is_ok(),
+		"この OS の既定シェルを弾いてしまった"
+	);
 }
