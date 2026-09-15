@@ -16,6 +16,7 @@ mod exe_path;
 mod logger;
 #[cfg(windows)]
 mod platform;
+mod path_fmt;
 mod placeholder;
 mod router;
 mod templates;

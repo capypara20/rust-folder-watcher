@@ -431,13 +431,13 @@ pub async fn run_router(
                         // 検知: ターミナル（system）＋検知ログ（ルール別ファイル）へ
                         log.log_match(
                             &rule.name,
-                            path.display().to_string(),
+                            crate::path_fmt::for_log(&path),
                             detected_events.clone(),
                         );
                         if let Some(dl) = &rule.detect_logger {
                             dl.log_match(
                                 &rule.name,
-                                path.display().to_string(),
+                                crate::path_fmt::for_log(&path),
                                 detected_events.clone(),
                             );
                         }
@@ -445,7 +445,7 @@ pub async fn run_router(
                         // アクションログのブロック開始セパレータ
                         if let Some(al) = &rule.action_logger {
                             al.log_block_start(
-                                path.display().to_string(),
+                                crate::path_fmt::for_log(&path),
                                 detected_events.clone(),
                                 rule.actions.len(),
                             );

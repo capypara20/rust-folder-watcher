@@ -52,7 +52,7 @@ async fn move_one_file(
     if dest.exists() && !opts.overwrite {
         sink.warn(step.0, step.1, format!(
             "move スキップ (overwrite=false で既存): {}",
-            dest.display()
+            crate::path_fmt::for_log(dest)
         ));
         return Ok(None);
     }
@@ -62,20 +62,20 @@ async fn move_one_file(
     // まず rename を試みる（同一ボリューム）
     match tokio::fs::rename(src, dest).await {
         Ok(()) => {
-            sink.ok(step.0, step.1, format!("移動完了 (rename): {} → {}", src.display(), dest.display()));
+            sink.ok(step.0, step.1, format!("移動完了 (rename): {} → {}", crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest)));
             return Ok(Some(dest.to_path_buf()));
         }
         Err(e) if is_cross_device(&e) => {
             sink.note(step.0, step.1, format!(
                 "異ボリューム検出: copy フォールバックで移動します {} → {}",
-                src.display(),
-                dest.display()
+                crate::path_fmt::for_log(src),
+                crate::path_fmt::for_log(dest)
             ));
         }
         Err(e) => {
             return Err(AppError::Action(format!(
                 "rename 失敗 ({}): {}",
-                src.display(),
+                crate::path_fmt::for_log(src),
                 e
             )));
         }
@@ -91,7 +91,7 @@ async fn move_one_file(
                 tokio::fs::remove_file(src).await.map_err(|e| {
                     AppError::Action(format!(
                         "move: 元ファイルの削除に失敗 ({}): {}",
-                        src.display(),
+                        crate::path_fmt::for_log(src),
                         e
                     ))
                 })?;
@@ -100,8 +100,8 @@ async fn move_one_file(
                     .unwrap_or_default();
                 sink.ok(step.0, step.1, format!(
                     "移動完了 (copy+delete): {} → {}{}",
-                    src.display(),
-                    dest.display(),
+                    crate::path_fmt::for_log(src),
+                    crate::path_fmt::for_log(dest),
                     hash_suffix,
                 ));
                 return Ok(Some(dest.to_path_buf()));
@@ -111,13 +111,13 @@ async fn move_one_file(
                 if attempt < max_attempts {
                     sink.warn(step.0, step.1, format!(
                         "move 失敗 ({}回目/{}回): {} → {}: {} (再試行)",
-                        attempt, max_attempts, src.display(), dest.display(), e
+                        attempt, max_attempts, crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), e
                     ));
                     tokio::time::sleep(interval).await;
                 } else {
                     return Err(AppError::Action(format!(
                         "move 最終失敗 ({}回試行): {} → {}: {}",
-                        max_attempts, src.display(), dest.display(), e
+                        max_attempts, crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), e
                     )));
                 }
             }
@@ -167,7 +167,7 @@ async fn move_directory_recursive(
         sink.warn(step.0, step.1, format!(
             "移動元フォルダは削除しませんでした（overwrite=false でスキップしたファイルが {} 件残っています）: {}",
             skipped,
-            src_dir.display()
+            crate::path_fmt::for_log(src_dir)
         ));
         return Ok(Some(folder_dest));
     }
@@ -175,7 +175,7 @@ async fn move_directory_recursive(
     tokio::fs::remove_dir_all(src_dir).await.map_err(|e| {
         AppError::Action(format!(
             "移動元フォルダの削除に失敗 ({}): {}",
-            src_dir.display(),
+            crate::path_fmt::for_log(src_dir),
             e
         ))
     })?;
@@ -184,7 +184,7 @@ async fn move_directory_recursive(
     // 行が 1 本も出ず、何も起きなかったように見えてしまうため。
     sink.ok(step.0, step.1, format!(
         "フォルダの移動完了: {} → {}（ファイル {} 件・サブフォルダ {} 件）",
-        src_dir.display(), folder_dest.display(), files.len(), dirs.len()
+        crate::path_fmt::for_log(src_dir), crate::path_fmt::for_log(&folder_dest), files.len(), dirs.len()
     ));
 
     Ok(Some(folder_dest))
