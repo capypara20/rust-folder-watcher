@@ -552,7 +552,9 @@ fn test_validate_action_command_required_fields() {
 #[test]
 fn test_validate_action_execute_required_fields() {
 	let mut valid = base_action(ActionType::Execute);
-	valid.program = Some("notepad.exe".to_string());
+	// program は PATH で解決できる必要がある。notepad.exe のような Windows 固有の名前を
+	// 使うと Linux の CI で落ちる（WSL は Windows の PATH を引き継ぐので気づけない）。
+	valid.program = Some(ON_PATH_PROGRAM.to_string());
 	valid.args = Some(vec![]);
 	valid.working_dir = Some("".to_string());
 	assert!(validate_action(&valid, "test").is_ok());
