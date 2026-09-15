@@ -47,6 +47,45 @@ cargo build --release --locked --manifest-path cat-watcher/Cargo.toml
   MSVC で壊れることがある**ので、Windows 固有コードを触ったら CI の結果を必ず確認する。
 - `.cargo/config.toml` が MSVC ビルドに `crt-static` を付けている（VC++ 再頒布パッケージ不要にするため）。
 
+## WSL で Linux 側を検証するとき
+
+CI は Ubuntu でもテストを回すので、Linux 側の経路は WSL で確認できる。
+ただし **そのまま使うと検証にならない落とし穴が 2 つある。**
+
+### 1. WSL の PATH には Windows のパスが入っている
+
+既定で Windows 相互運用が有効なため、`/mnt/c/...` 配下が PATH に大量に入る
+（実測で **49 個**）。そのため `notepad.exe` のような Windows 専用の実行ファイルが
+**WSL では見つかってしまう**。
+
+実際に「PATH で解決できること」を確かめるテストが WSL では通り、
+GitHub の Ubuntu ランナーで落ちた例がある。
+
+CI と同じ条件にするには `/mnt/` 由来を除いた PATH で回す。
+
+```bash
+CLEAN=$(echo "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd:)
+PATH="$CLEAN" cargo test --locked --manifest-path cat-watcher/Cargo.toml
+```
+
+### 2. `/mnt/c` 配下では inotify が効かない
+
+Windows ドライブは drvfs 経由でマウントされており、ファイル変更通知が飛んでこない。
+監視対象は **WSL ネイティブ側（`~/` 配下など ext4 上）** に置くこと。
+Windows 側の「共有フォルダや UNC では監視 API が効かない」と同じ種類の制約。
+
+ビルドも `/mnt/c` 上では I/O が遅いので、ソースを `~/` へコピーしてから行う。
+
+```bash
+tar -C /mnt/c/Users/capypara20/Developer/02_App/rust-folder-watcher \
+    --exclude=./target --exclude=./.git -cf - . | tar -C ~/cat-watcher-src -xf -
+```
+
+### Rust ツールチェイン
+
+Ubuntu-24.04 に `rustup` で導入済み（`~/.cargo/bin`）。`gcc` は最初から入っている。
+`sudo` はパスワードを要求するが、`rustup` は root 不要なので問題ない。
+
 ## テストの置き場所
 
 テスト本体は **`cat-watcher/src/tests/` に集約**し、各モジュール末尾から `#[path]` で読み込む。
