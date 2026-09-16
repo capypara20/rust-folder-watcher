@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 
 use super::model::{GlobalConfig, RulesConfig};
 use super::types::ActionType;
-use crate::error::AppError;
+use super::validate::{validate_global_config, validate_rules_config};
+use crate::error::{AppError, InvalidFile};
+use crate::path_fmt;
 
 /// 設定ファイルを既定の場所から探す。
 ///
@@ -13,6 +15,11 @@ use crate::error::AppError;
 /// になるため、実行ファイル横も見ることで「exe と設定を同じフォルダに置いて
 /// サービス登録する」運用がオプション指定なしで動く。
 pub fn find_config_file(file_name: &str) -> Option<PathBuf> {
+	config_file_candidates(file_name).into_iter().find(|p| p.is_file())
+}
+
+/// 既定の設定ファイルを探す場所。見つからなかったときのエラーにも出す。
+fn config_file_candidates(file_name: &str) -> Vec<PathBuf> {
 	let mut candidates = Vec::new();
 	if let Ok(cwd) = std::env::current_dir() {
 		candidates.push(cwd.join(file_name));
@@ -22,7 +29,7 @@ pub fn find_config_file(file_name: &str) -> Option<PathBuf> {
 			candidates.push(dir.join(file_name));
 		}
 	}
-	candidates.into_iter().find(|p| p.is_file())
+	candidates
 }
 
 /// コマンドラインで明示されたパスがあればそれを、無ければ既定の場所から探す。
@@ -36,8 +43,14 @@ pub fn resolve_config_path(
 		return Ok(path);
 	}
 	find_config_file(file_name).ok_or_else(|| {
-		AppError::Config(format!(
-			"{flag} が未指定で、{file_name} も見つかりませんでした（カレントディレクトリと実行ファイルと同じフォルダを探しました）"
+		// 「どこを探したか」を実際のパスで出す。サービスではカレントディレクトリが
+		// 想定と違うことが多く、場所の説明だけでは切り分けられないため。
+		let searched = config_file_candidates(file_name)
+			.iter()
+			.map(|p| format!("\n    {}", path_fmt::for_log(p)))
+			.collect::<String>();
+		AppError::Usage(format!(
+			"{file_name} が見つかりません。{flag} で設定ファイルのパスを指定してください\n  探した場所:{searched}"
 		))
 	})
 }
@@ -53,10 +66,45 @@ pub(crate) fn expand_tilde(s: &str) -> String {
 	s.to_string()
 }
 
+/// 設定を読み込み、global の既定値をルールへ反映し、検証まで済ませる。
+///
+/// CLI とサービスの両方がここを通る。以前は同じ手順を 2 か所に書いていた。
+///
+/// 検証は global と rules の両方を行ってからまとめて返す。
+/// 片方で止めると、直して再実行したあとにもう片方の問題が出てくるため。
+pub fn load(global_path: &Path, rules_path: &Path) -> Result<(GlobalConfig, RulesConfig), AppError> {
+	let global = load_global_config(global_path)?;
+	let mut rules = load_rules_config(rules_path)?;
+	// 検証と実行時が同じ値を見るよう、検証の前に反映する。
+	apply_global_defaults(&global, &mut rules);
+
+	let mut invalid = Vec::new();
+	if let Err(problems) = validate_global_config(&global) {
+		invalid.push(InvalidFile::new(global_path, problems));
+	}
+	if let Err(problems) = validate_rules_config(&rules) {
+		invalid.push(InvalidFile::new(rules_path, problems));
+	}
+	if !invalid.is_empty() {
+		return Err(AppError::ConfigInvalid(invalid));
+	}
+	Ok((global, rules))
+}
+
+/// 設定ファイルを読んで TOML として解釈する。失敗したらファイルパスを添える。
+fn read_toml<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, AppError> {
+	let content = std::fs::read_to_string(path).map_err(|source| AppError::ConfigRead {
+		path: path.to_path_buf(),
+		source,
+	})?;
+	toml::from_str(&content).map_err(|e| AppError::ConfigParse {
+		path: path.to_path_buf(),
+		message: e.to_string().trim_end().to_string(),
+	})
+}
+
 pub fn load_global_config(path: &Path) -> Result<GlobalConfig, AppError> {
-	let content = std::fs::read_to_string(path)?;
-	let mut config: GlobalConfig = toml::from_str(&content)
-							.map_err(|e| AppError::TomlParse(e.to_string()))?;
+	let mut config: GlobalConfig = read_toml(path)?;
 	config.system_log.dir = expand_tilde(&config.system_log.dir);
 	Ok(config)
 }
@@ -91,9 +139,7 @@ pub fn apply_global_defaults(global: &GlobalConfig, rules: &mut RulesConfig) {
 }
 
 pub fn load_rules_config(path: &Path) -> Result<RulesConfig, AppError> {
-	let content = std::fs::read_to_string(path)?;
-	let mut config: RulesConfig = toml::from_str(&content)
-							.map_err(|e| AppError::TomlParse(e.to_string()))?;
+	let mut config: RulesConfig = read_toml(path)?;
 	for rule in &mut config.rules {
 		rule.watch.path = expand_tilde(&rule.watch.path);
 		for action in &mut rule.actions {

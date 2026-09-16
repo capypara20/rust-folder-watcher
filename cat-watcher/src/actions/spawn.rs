@@ -1,6 +1,8 @@
 use std::process::Stdio;
 use std::time::Duration;
 
+use crate::config::ProcessWait;
+
 /// 外部プロセスへ渡す引数 1 つ。
 ///
 /// Windows ではコマンドラインが 1 本の文字列としてプロセスへ渡るため、引数を
@@ -31,13 +33,14 @@ pub enum WaitMode {
     Wait { timeout: Option<Duration> },
 }
 
-/// 設定値（解決済みの `wait` / `timeout_ms`）から待ち方を決める。
+/// 設定値（検証済みの `wait` / `timeout_ms`）から待ち方を決める。
 ///
-/// `timeout_ms` が未指定または `0` の場合は「無制限」として扱う。
-pub fn wait_mode_from(wait: Option<bool>, timeout_ms: Option<u64>) -> WaitMode {
-    if wait.unwrap_or(false) {
+/// `timeout_ms` の「未指定または `0` は無制限」は、`ProcessWait` を作る時点で
+/// `None` に揃えてある。
+pub fn wait_mode_from(wait: ProcessWait) -> WaitMode {
+    if wait.enabled {
         WaitMode::Wait {
-            timeout: timeout_ms.filter(|ms| *ms > 0).map(Duration::from_millis),
+            timeout: wait.timeout_ms.map(Duration::from_millis),
         }
     } else {
         WaitMode::Detach

@@ -165,10 +165,10 @@ pub async fn execute_chain(
         sink.action_start(index, total, action.type_.as_str(), detail);
 
         let result: Result<Option<std::path::PathBuf>, AppError> = match &validated {
-            Action::Copy(_) => copy::execute(action, src, &ctx, retry, &sink, step).await,
-            Action::Move(_) => r#move::execute(action, src, &ctx, retry, &sink, step).await,
-            Action::Command(_) => command::execute(action, &ctx, &sink, step).await.map(|_| None),
-            Action::Execute(_) => execute::execute(action, &ctx, &sink, step).await.map(|_| None),
+            Action::Copy(t) => copy::execute(t, src, &ctx, retry, &sink, step).await,
+            Action::Move(t) => r#move::execute(t, src, &ctx, retry, &sink, step).await,
+            Action::Command(c) => command::execute(c, &ctx, &sink, step).await.map(|_| None),
+            Action::Execute(e) => execute::execute(e, &ctx, &sink, step).await.map(|_| None),
         };
 
         match result {

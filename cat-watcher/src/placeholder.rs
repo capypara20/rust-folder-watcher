@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::LazyLock;
 
-use crate::error::AppError;
 use chrono::Local;
 use regex::Regex;
 
@@ -56,7 +55,11 @@ impl PlaceholderContext {
 static PLACEHOLDER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{|\}\}|\{([A-Za-z]+)\}").unwrap());
 
-pub fn expand_placeholders(template: &str, ctx: &PlaceholderContext) -> Result<String, AppError> {
+/// テンプレートのプレースホルダーを置き換える。
+///
+/// 知らない名前はそのまま残す（起動時の検査で弾いているので、実行時には来ない）。
+/// 失敗する経路が無いので `Result` にはしない。
+pub fn expand_placeholders(template: &str, ctx: &PlaceholderContext) -> String {
     let result = PLACEHOLDER_REGEX.replace_all(template, |caps: &regex::Captures| {
         if let Some(name) = caps.get(1) {
             match name.as_str() {
@@ -81,41 +84,46 @@ pub fn expand_placeholders(template: &str, ctx: &PlaceholderContext) -> Result<S
             }
         }
     });
-    Ok(result.to_string())
+    result.to_string()
 }
 
-pub fn validate_placeholders(
-    text: &str,
-    rule_name: &str,
-    field_name: &str,
-) -> Result<(), AppError> {
-    // 有効なブレースホルダー
-    let valid = [
-        "FullName",
-        "DirectoryName",
-        "Name",
-        "BaseName",
-        "Extension",
-        "RelativePath",
-        "WatchPath",
-        "Destination",
-        "Date",
-        "Time",
-        "DateTime",
-    ];
+/// 使えるプレースホルダーの名前。エラー時の案内にもそのまま出す。
+pub const VALID_PLACEHOLDERS: &[&str] = &[
+    "FullName",
+    "DirectoryName",
+    "Name",
+    "BaseName",
+    "Extension",
+    "RelativePath",
+    "WatchPath",
+    "Destination",
+    "Date",
+    "Time",
+    "DateTime",
+];
 
-    for caps in PLACEHOLDER_REGEX.captures_iter(text) {
-        if let Some(name) = caps.get(1) {
-            let placeholder = name.as_str();
-            if !valid.contains(&placeholder) {
-                return Err(AppError::Validation(format!(
-                    "監視ルール名 {} の {} に未知のブレースホルダーがあります {{{}}}",
-                    rule_name, field_name, placeholder
-                )));
-            }
-        }
-    }
-    Ok(())
+/// 文字列の中のプレースホルダーを、名前を問わず最初の 1 つだけ返す。
+///
+/// 実行時に展開しない項目（`program` / `working_dir`）に書かれていないかを
+/// 確かめるのに使う。`{{` `}}` はエスケープなので数えない。
+pub fn find_any_placeholder(text: &str) -> Option<String> {
+    PLACEHOLDER_REGEX
+        .captures_iter(text)
+        .find_map(|caps| caps.get(1))
+        .map(|name| name.as_str().to_string())
+}
+
+/// 文字列の中から、使えないプレースホルダーを最初の 1 つだけ返す。
+///
+/// どの設定のどこに書かれていたかはここでは分からないので、
+/// 場所を付けて問題にするのは呼び出し側（設定の検証）の役目。
+pub fn find_unknown_placeholder(text: &str) -> Option<String> {
+    PLACEHOLDER_REGEX
+        .captures_iter(text)
+        .filter_map(|caps| caps.get(1))
+        .map(|name| name.as_str())
+        .find(|name| !VALID_PLACEHOLDERS.contains(name))
+        .map(str::to_string)
 }
 
 #[cfg(test)]

@@ -35,7 +35,7 @@ fn test_expand_each_placeholder() {
         ("{DateTime}", "20260412_153000"),
     ];
     for (template, expected) in cases {
-        assert_eq!(expand_placeholders(template, &ctx).unwrap(), expected, "template: {template}");
+        assert_eq!(expand_placeholders(template, &ctx), expected, "template: {template}");
     }
 }
 
@@ -44,15 +44,15 @@ fn test_expand_composite_and_escape() {
     let ctx = make_ctx();
     // 複合テンプレート
     assert_eq!(
-        expand_placeholders("{DirectoryName}/{BaseName}_{DateTime}.{Extension}", &ctx).unwrap(),
+        expand_placeholders("{DirectoryName}/{BaseName}_{DateTime}.{Extension}", &ctx),
         "C:/data/incoming/report_20260412_153000.csv"
     );
     // {{ }} エスケープ
-    assert_eq!(expand_placeholders("{{literal}}", &ctx).unwrap(), "{literal}");
-    assert_eq!(expand_placeholders("{{prefix}}_{Name}", &ctx).unwrap(), "{prefix}_report.csv");
+    assert_eq!(expand_placeholders("{{literal}}", &ctx), "{literal}");
+    assert_eq!(expand_placeholders("{{prefix}}_{Name}", &ctx), "{prefix}_report.csv");
     // プレースホルダなし
     assert_eq!(
-        expand_placeholders("plain text without placeholders", &ctx).unwrap(),
+        expand_placeholders("plain text without placeholders", &ctx),
         "plain text without placeholders"
     );
 }
@@ -61,24 +61,20 @@ fn test_expand_composite_and_escape() {
 fn test_expand_extension_empty_for_no_extension_file() {
     let mut ctx = make_ctx();
     ctx.extension = "".to_string();
-    assert_eq!(expand_placeholders("{BaseName}.{Extension}", &ctx).unwrap(), "report.");
+    assert_eq!(expand_placeholders("{BaseName}.{Extension}", &ctx), "report.");
 }
 
 #[test]
 fn test_validate_known_inputs_ok() {
     let all = "{FullName}{DirectoryName}{Name}{BaseName}{Extension}{RelativePath}{WatchPath}{Destination}{Date}{Time}{DateTime}";
-    assert!(validate_placeholders(all, "rule1", "destination").is_ok());
-    assert!(validate_placeholders("{{escaped}}", "rule1", "destination").is_ok());
-    assert!(validate_placeholders("just plain text", "rule1", "destination").is_ok());
+    assert_eq!(find_unknown_placeholder(all), None);
+    assert_eq!(find_unknown_placeholder("{{escaped}}"), None);
+    assert_eq!(find_unknown_placeholder("just plain text"), None);
 }
 
 #[test]
-fn test_validate_unknown_placeholder_error_contains_context() {
-    let result = validate_placeholders("{Bad}", "my-rule", "action.command");
-    let err_msg = result.unwrap_err().to_string();
-    assert!(err_msg.contains("my-rule"));
-    assert!(err_msg.contains("action.command"));
-    assert!(err_msg.contains("{Bad}"));
+fn test_unknown_placeholder_is_reported_by_name() {
+    assert_eq!(find_unknown_placeholder("a {Name} b {Bad} c {Worse}"), Some("Bad".to_string()));
 }
 
 #[test]
@@ -125,4 +121,11 @@ fn test_new_context_date_format() {
     assert_eq!(ctx.time.len(), 6); // HHmmss
     assert_eq!(ctx.datetime.len(), 15); // YYYYMMDD_HHmmss
     assert!(ctx.datetime.contains('_'));
+}
+
+#[test]
+fn find_any_placeholder_ignores_escapes() {
+    assert_eq!(find_any_placeholder("{{literal}}"), None);
+    assert_eq!(find_any_placeholder("C:/tools/app.exe"), None);
+    assert_eq!(find_any_placeholder("C:/{WatchPath}/x"), Some("WatchPath".to_string()));
 }

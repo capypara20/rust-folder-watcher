@@ -2,35 +2,21 @@
 
 use super::*;
 
-/// 終了コードが原因の種類ごとに分かれること。
+/// SCM へ報告する終了コードが、CLI と同じ値で、段階ごとに分かれること。
 ///
 /// 従来は失敗が常に `Win32(1)`（「ファンクションが間違っています」）で、
 /// `sc query` を見ても設定エラーなのか実行時エラーなのか分からなかった。
 #[test]
 fn exit_code_distinguishes_failure_kinds() {
-    assert_eq!(
-        exit_code_for(&AppError::Config("x".into())),
-        exit_code::CONFIG
-    );
-    assert_eq!(
-        exit_code_for(&AppError::Validation("x".into())),
-        exit_code::CONFIG
-    );
-    assert_eq!(
-        exit_code_for(&AppError::TomlParse("x".into())),
-        exit_code::CONFIG
-    );
-    assert_eq!(
-        exit_code_for(&AppError::Io(std::io::Error::other("x"))),
-        exit_code::LOG
-    );
-    assert_eq!(
-        exit_code_for(&AppError::Watch("x".into())),
-        exit_code::RUNTIME
-    );
+    use crate::error::exit_code;
+
+    let config = AppError::Usage("x".into());
+    let runtime = AppError::Runtime("x".into());
+    assert_eq!(exit_code_for(&config), exit_code::CONFIG as u32);
+    assert_eq!(exit_code_for(&runtime), exit_code::RUNTIME as u32);
 
     // 0 は成功を意味するので、失敗に 0 を返してはいけない。
-    for e in [AppError::Config("x".into()), AppError::Watch("x".into())] {
+    for e in [config, runtime] {
         assert_ne!(exit_code_for(&e), 0, "失敗なのに成功扱いの終了コード");
     }
 }

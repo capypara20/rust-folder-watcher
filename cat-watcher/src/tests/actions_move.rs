@@ -1,6 +1,5 @@
 use super::*;
-use crate::test_support::{base_action, make_retry, make_sink, write_file};
-use crate::config::ActionType;
+use crate::test_support::{make_retry, make_sink, write_file};
 use tempfile::tempdir;
 
 fn make_move_action(
@@ -8,13 +7,14 @@ fn make_move_action(
     overwrite: bool,
     preserve_structure: bool,
     verify_integrity: bool,
-) -> ActionConfig {
-    let mut a = base_action(ActionType::Move);
-    a.destination = Some(dest.to_string());
-    a.overwrite = Some(overwrite);
-    a.preserve_structure = Some(preserve_structure);
-    a.verify_integrity = Some(verify_integrity);
-    a
+) -> Transfer {
+    Transfer {
+        destination: dest.to_string(),
+        overwrite,
+        preserve_structure,
+        verify_integrity,
+        auto_create: true,
+    }
 }
 
 #[tokio::test]
@@ -143,7 +143,7 @@ async fn auto_create_false_errors_when_destination_missing() {
 
     let missing = dest_root.path().join("not_created_yet");
     let mut action = make_move_action(missing.to_str().unwrap(), false, false, false);
-    action.auto_create = Some(false);
+    action.auto_create = false;
     let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
     let result = execute(&action, &src, &ctx, &make_retry(0), &make_sink(), (1, 1)).await;

@@ -248,36 +248,37 @@ fn process_types_accept_wait_and_timeout() {
 // エラー文
 // =========================================================
 
-/// エラー文の type は、利用者が TOML に書いた綴りで出すこと。
+/// エラーの type は、利用者が TOML に書いた綴りで出すこと。
 /// `Copy` と書かれても設定ファイルの中は `copy` なので、探すときに困る。
 #[test]
-fn message_uses_the_spelling_from_the_toml() {
+fn problem_uses_the_spelling_from_the_toml() {
     let mut raw = filled(ActionType::Copy);
     raw.destination = None;
-    let text = missing_fields(&raw)[0].message("my-rule", ActionType::Copy);
+    let problem = missing_fields(&raw)[0].problem(RuleRef::new("my-rule", 1), 2, ActionType::Copy);
 
-    assert!(text.contains("my-rule"), "ルール名が入っていない: {text}");
-    assert!(text.contains("type が copy のとき"), "綴りが copy でない: {text}");
-    assert!(text.contains("destination(コピー先/移動先)"), "{text}");
+    assert_eq!(
+        problem.location,
+        Location::Action { rule: RuleRef::new("my-rule", 1), index: 2, key: "destination".into() }
+    );
+    assert!(problem.message.contains(r#"type = "copy""#), "綴りが copy でない: {}", problem.message);
+    assert!(problem.message.contains("コピー先/移動先"), "{}", problem.message);
 }
 
-/// 補足（hint）付きの項目は、文末に案内が足されること。
+/// 補足（hint）付きの項目は、対処として案内されること。
 #[test]
-fn message_appends_the_hint() {
+fn problem_carries_the_hint() {
     let mut raw = filled(ActionType::Execute);
     raw.args = None;
-    let text = missing_fields(&raw)[0].message("r", ActionType::Execute);
-    assert!(
-        text.contains("引数がない場合は空の配列を指定してください"),
-        "補足が出ていない: {text}"
-    );
+    let problem = missing_fields(&raw)[0].problem(RuleRef::new("r", 1), 1, ActionType::Execute);
+    let hint = problem.hint.expect("補足が出ていない");
+    assert!(hint.contains("空の配列"), "{hint}");
 }
 
 #[test]
-fn rejected_message_names_the_key_and_type() {
+fn rejected_problem_names_the_key_and_type() {
     let mut raw = filled(ActionType::Copy);
     raw.wait = Some(true);
-    let text = rejected_fields(&raw)[0].message("r", ActionType::Copy);
-    assert!(text.contains("wait"), "{text}");
-    assert!(text.contains("copy"), "{text}");
+    let problem = rejected_fields(&raw)[0].problem(RuleRef::new("r", 1), 1, ActionType::Copy);
+    assert!(matches!(&problem.location, Location::Action { key, .. } if key == "wait"));
+    assert!(problem.message.contains("copy"), "{}", problem.message);
 }

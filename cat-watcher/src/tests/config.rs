@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::AppError;
 use crate::test_support::base_action;
 use tempfile::tempdir;
 
@@ -7,10 +8,15 @@ fn sanitize_path(path: &std::path::Path) -> String {
 }
 
 /// collect_action_errors を単体で呼ぶテスト用ラッパー
-fn validate_action(action: &ActionConfig, rule_name: &str) -> Result<(), AppError> {
+fn validate_action(action: &ActionConfig, rule_name: &str) -> Result<(), Problems> {
 	let mut errors = Vec::new();
-	collect_action_errors(action, rule_name, &mut errors);
+	collect_action_errors(action, &RuleRef::new(rule_name, 1), 1, &mut errors);
 	finish_validation(errors)
+}
+
+/// 問題の一覧を、利用者が見るのと同じ文面にする（文言の確認用）。
+fn render_all(problems: &[Problem]) -> String {
+	problems.iter().map(|p| p.render("  ")).collect::<Vec<_>>().join(" / ")
 }
 
 // =========================================================
@@ -62,7 +68,7 @@ fn make_rules_toml(watch_path: &str, action_block: &str) -> String {
 	rule_toml("test-rule", watch_path, r#""create", "modify""#, action_block)
 }
 
-fn validate_toml(toml_str: &str) -> Result<(), AppError> {
+fn validate_toml(toml_str: &str) -> Result<(), Problems> {
 	let config: RulesConfig = toml::from_str(toml_str).unwrap();
 	validate_rules_config(&config)
 }
@@ -751,14 +757,14 @@ fn execute_action(program: &str) -> ActionConfig {
 /// PATH 上に無い program は起動時に弾くこと。
 ///
 /// 素通りさせると、検知が起きるたびに同じ失敗を繰り返すことになる。
-/// 特にサービスはシステム PATH しか見ないため、ユーザー領域に入れた
-/// 実行ファイル（scoop 等）はここで検出しないと気づけない。
+/// 特に Windows のサービスはサービスの実行アカウントの PATH で探すため、
+/// CLI では見つかる実行ファイルがサービスでは見つからないことがある。
 #[test]
 fn execute_program_not_on_path_is_rejected() {
 	let action = execute_action("cat-watcher-definitely-not-a-real-command-xyz");
 	let err = validate_action(&action, "r").expect_err("PATH に無い program は弾くこと");
-	let msg = err.to_string();
-	assert!(msg.contains("PATH 上で見つかりません"), "{msg}");
+	let msg = render_all(&err);
+	assert!(msg.contains("PATH 上に見つかりません"), "{msg}");
 }
 
 /// 名前だけの指定でも、PATH 上にあれば通ること。
@@ -779,7 +785,7 @@ fn execute_absolute_program_that_is_missing_is_rejected() {
 	let missing = dir.path().join("nested").join("tool.exe");
 	let action = execute_action(missing.to_str().unwrap());
 	let err = validate_action(&action, "r").expect_err("存在しない絶対パスは弾くこと");
-	assert!(err.to_string().contains("存在しません"), "{err}");
+	assert!(render_all(&err).contains("存在しません"), "{err:?}");
 }
 
 /// この OS で使えるシェルは、実体が見つかるので通ること。
@@ -794,4 +800,232 @@ fn command_shell_executable_is_found() {
 		validate_action(&a, "r").is_ok(),
 		"この OS の既定シェルを弾いてしまった"
 	);
+}
+
+// =========================================================
+// config::load: 読み込み・書式・内容のエラーにファイルが分かる形で付くこと
+// =========================================================
+
+/// 検証が通る global.toml を書き出す。ログ出力先には実在するフォルダが要る。
+fn write_valid_global(dir: &std::path::Path) -> std::path::PathBuf {
+	let path = dir.join("global.toml");
+	std::fs::write(
+		&path,
+		format!(
+			r#"
+			[retry]
+			count = 1
+			interval_ms = 10
+
+			[system_log]
+			dir = "{}"
+			file_name = "system.log"
+			rotation = "daily"
+			level = "info"
+			"#,
+			sanitize_path(dir)
+		),
+	)
+	.unwrap();
+	path
+}
+
+fn write_valid_rules(dir: &std::path::Path) -> std::path::PathBuf {
+	let path = dir.join("rules.toml");
+	std::fs::write(&path, make_rules_toml(&sanitize_path(dir), &cmd_action())).unwrap();
+	path
+}
+
+#[test]
+fn load_succeeds_with_valid_files() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let rules = write_valid_rules(dir.path());
+	let (_, rules_conf) = load(&global, &rules).expect("正しい設定は読み込めること");
+	assert_eq!(rules_conf.rules.len(), 1);
+}
+
+/// 読めないファイルは ConfigRead になり、そのパスを持つこと。
+///
+/// 以前は `?` で `io::Error` がそのまま上がり、どのファイルか分からないうえ
+/// 終了コードも「ログの初期化に失敗」になっていた。
+#[test]
+fn load_reports_which_file_could_not_be_read() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let missing = dir.path().join("no-such-rules.toml");
+
+	match load(&global, &missing) {
+		Err(AppError::ConfigRead { path, .. }) => assert_eq!(path, missing),
+		other => panic!("ConfigRead を期待したが {other:?}"),
+	}
+}
+
+/// TOML の書き間違いは ConfigParse になり、そのパスを持つこと。
+#[test]
+fn load_reports_which_file_has_a_syntax_error() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let rules = dir.path().join("rules.toml");
+	std::fs::write(&rules, "[[rules]\nname = ").unwrap();
+
+	match load(&global, &rules) {
+		Err(AppError::ConfigParse { path, .. }) => assert_eq!(path, rules),
+		other => panic!("ConfigParse を期待したが {other:?}"),
+	}
+}
+
+/// global と rules の両方に問題があれば、両方をまとめて報告すること。
+/// 片方で止めると、直して再実行したあとにもう片方の問題が出てくる。
+#[test]
+fn load_reports_problems_in_both_files_at_once() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	// ログ出力先を実在しないフォルダにして global を不正にする
+	let text = std::fs::read_to_string(&global).unwrap();
+	let broken = text.replace(&sanitize_path(dir.path()), &format!("{}/missing", sanitize_path(dir.path())));
+	std::fs::write(&global, broken).unwrap();
+	// ルール 0 件で rules も不正にする
+	let rules = dir.path().join("rules.toml");
+	std::fs::write(&rules, "rules = []\n").unwrap();
+
+	match load(&global, &rules) {
+		Err(AppError::ConfigInvalid(files)) => {
+			let paths: Vec<_> = files.iter().map(|f| f.path.clone()).collect();
+			assert_eq!(paths, vec![global, rules], "両方のファイルが報告されていない");
+			assert!(files.iter().all(|f| !f.problems.is_empty()));
+		}
+		other => panic!("ConfigInvalid を期待したが {other:?}"),
+	}
+}
+
+/// 既定の設定ファイルが見つからないとき、実際に探したパスを出すこと。
+#[test]
+fn missing_default_config_lists_searched_locations() {
+	let name = "cat-watcher-no-such-config-file.toml";
+	let err = resolve_config_path(None, name, "--global").unwrap_err();
+	let text = err.to_string();
+	assert!(matches!(err, AppError::Usage(_)), "{err:?}");
+	assert!(text.contains("--global"), "{text}");
+	assert!(text.contains("探した場所"), "{text}");
+	assert!(text.matches(name).count() >= 2, "探した場所のパスが出ていない: {text}");
+}
+
+// =========================================================
+// 実行ファイルの検査: 対処文は OS の事実に合わせる
+// =========================================================
+
+/// PATH 上に無いときの対処は OS に合わせること。
+///
+/// Windows のサービスは、サービスの実行アカウントの PATH で実行ファイルを探す。
+/// これは Windows だけの事実なので、Linux では出さない。
+#[test]
+fn not_on_path_hint_matches_the_os() {
+	let action = execute_action("cat-watcher-definitely-not-a-real-command-xyz");
+	let problems = validate_action(&action, "r").unwrap_err();
+	let hint = problems[0].hint.clone().expect("対処が無い");
+	assert!(hint.contains("フルパスで指定するか"), "{hint}");
+	#[cfg(windows)]
+	assert!(hint.contains("サービスとして動かす場合"), "{hint}");
+	#[cfg(not(windows))]
+	assert!(!hint.contains("サービス"), "Linux にサービスの PATH の説明は要らない: {hint}");
+}
+
+/// ファイルは在るが実行権限が無いときは、「存在しません」ではなく
+/// 実行権限の問題として案内すること（Unix 固有）。
+#[cfg(not(windows))]
+#[test]
+fn execute_program_without_execute_bit_is_reported_as_permission() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let dir = tempdir().unwrap();
+	let path = dir.path().join("noexec.sh");
+	std::fs::write(&path, b"#!/bin/sh").unwrap();
+	let mut perm = std::fs::metadata(&path).unwrap().permissions();
+	perm.set_mode(0o644);
+	std::fs::set_permissions(&path, perm).unwrap();
+
+	let action = execute_action(path.to_str().unwrap());
+	let problems = validate_action(&action, "r").unwrap_err();
+	let text = render_all(&problems);
+	assert!(text.contains("実行権限がありません"), "{text}");
+	assert!(text.contains("chmod +x"), "{text}");
+	assert!(!text.contains("存在しません"), "ファイルは在るのに存在しないと言っている: {text}");
+}
+
+/// 問題の場所は、ルール名とアクションの番号（1 始まり）で指すこと。
+#[test]
+fn action_problems_point_at_rule_and_action_number() {
+	let mut raw = base_action(ActionType::Copy);
+	raw.overwrite = Some(true);
+	raw.preserve_structure = Some(false);
+	raw.verify_integrity = Some(false);
+	let mut problems = Vec::new();
+	collect_action_errors(&raw, &RuleRef::new("backup", 1), 3, &mut problems);
+
+	assert_eq!(problems.len(), 1, "{problems:?}");
+	assert_eq!(problems[0].location.to_string(), r#"rules "backup" > actions[3] > destination"#);
+}
+
+// =========================================================
+// プレースホルダー: 実行時に展開する項目だけで使える
+// =========================================================
+
+/// program / working_dir は実行時に展開しないので、プレースホルダーを書いたら弾くこと。
+///
+/// 以前は「使える名前か」だけを見ていたため、`{FullName}` は検査を通るのに
+/// 実行時には置き換わらず、文字列のまま使われていた。
+#[test]
+fn placeholders_are_rejected_where_they_are_not_expanded() {
+	let mut a = base_action(ActionType::Execute);
+	a.program = Some(format!("{ON_PATH_PROGRAM}{{Date}}"));
+	a.args = Some(vec![]);
+	a.working_dir = Some("{WatchPath}".to_string());
+	let mut problems = Vec::new();
+	collect_action_placeholder_errors(&a, &RuleRef::new("r", 1), 1, &mut problems);
+
+	let keys: Vec<String> = problems
+		.iter()
+		.map(|p| match &p.location {
+			Location::Action { key, .. } => key.clone(),
+			other => panic!("アクションの場所ではない: {other:?}"),
+		})
+		.collect();
+	assert_eq!(keys, vec!["program", "working_dir"], "{problems:?}");
+}
+
+/// destination / command / args では、使える名前なら通り、知らない名前は弾くこと。
+#[test]
+fn placeholders_are_checked_by_name_where_they_are_expanded() {
+	let mut a = base_action(ActionType::Execute);
+	a.program = Some(ON_PATH_PROGRAM.to_string());
+	a.args = Some(vec!["{FullName}".to_string(), "{Bogus}".to_string()]);
+	a.working_dir = Some(String::new());
+	let mut problems = Vec::new();
+	collect_action_placeholder_errors(&a, &RuleRef::new("r", 1), 1, &mut problems);
+
+	assert_eq!(problems.len(), 1, "{problems:?}");
+	assert_eq!(problems[0].location.to_string(), r#"rules "r" > actions[1] > args[2]"#);
+}
+
+/// program / working_dir にプレースホルダーを書いたとき、同じ原因で
+/// 「存在しません」「PATH 上に見つかりません」を重ねて出さないこと。
+#[test]
+fn placeholder_in_unexpanded_field_is_reported_once() {
+	let mut a = base_action(ActionType::Execute);
+	a.program = Some("{FullName}".to_string());
+	a.args = Some(vec![]);
+	a.working_dir = Some("{WatchPath}".to_string());
+
+	let mut problems = Vec::new();
+	collect_action_errors(&a, &RuleRef::new("r", 1), 1, &mut problems);
+	collect_action_placeholder_errors(&a, &RuleRef::new("r", 1), 1, &mut problems);
+
+	for key in ["program", "working_dir"] {
+		let count = problems
+			.iter()
+			.filter(|p| matches!(&p.location, Location::Action { key: k, .. } if k == key))
+			.count();
+		assert_eq!(count, 1, "{key} の問題が {count} 件: {problems:?}");
+	}
 }

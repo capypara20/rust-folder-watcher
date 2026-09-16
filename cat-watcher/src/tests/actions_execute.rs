@@ -1,14 +1,15 @@
 use super::*;
-use crate::test_support::{base_action, make_sink};
-use crate::config::ActionType;
+use crate::config::ProcessWait;
+use crate::test_support::make_sink;
 use tempfile::tempdir;
 
-fn make_action(program: &str, args: Vec<&str>, working_dir: &str) -> ActionConfig {
-    let mut a = base_action(ActionType::Execute);
-    a.program = Some(program.to_string());
-    a.args = Some(args.into_iter().map(|s| s.to_string()).collect());
-    a.working_dir = Some(working_dir.to_string());
-    a
+fn make_action(program: &str, args: Vec<&str>, working_dir: &str) -> Execute {
+    Execute {
+        program: program.to_string(),
+        args: args.into_iter().map(|s| s.to_string()).collect(),
+        working_dir: working_dir.to_string(),
+        wait: ProcessWait { enabled: false, timeout_ms: None },
+    }
 }
 
 fn make_ctx(src: &std::path::Path, watch: &std::path::Path) -> PlaceholderContext {

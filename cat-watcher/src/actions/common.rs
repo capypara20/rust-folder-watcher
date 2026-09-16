@@ -1,35 +1,9 @@
 use std::path::{Path, PathBuf};
 
-use crate::config::ActionConfig;
+use crate::config::Transfer;
 use crate::error::AppError;
+use crate::path_fmt::for_log;
 use crate::placeholder::{expand_placeholders, PlaceholderContext};
-
-/// copy / move が参照する設定値をまとめたもの。
-/// `ActionConfig` の Option を 1 か所で既定値へ落とし込み、
-/// 下位の関数へは解決済みの値だけを渡す。
-#[derive(Clone, Copy)]
-pub struct TransferOptions {
-    /// 宛先に同名ファイルがあるとき上書きするか。false ならスキップ。
-    pub overwrite: bool,
-    /// 監視ルートからの相対パス構造を宛先にも作るか。
-    pub preserve_structure: bool,
-    /// コピー後に BLAKE3 で内容を検証するか。
-    pub verify_integrity: bool,
-    /// 宛先フォルダが無いときに自動作成するか。
-    /// 設定読み込み時に global.toml の既定値が焼き込まれている。
-    pub auto_create: bool,
-}
-
-impl TransferOptions {
-    pub fn from_action(action: &ActionConfig) -> Self {
-        Self {
-            overwrite: action.overwrite.unwrap_or(false),
-            preserve_structure: action.preserve_structure.unwrap_or(false),
-            verify_integrity: action.verify_integrity.unwrap_or(false),
-            auto_create: action.auto_create.unwrap_or(true),
-        }
-    }
-}
 
 /// コピー/移動先のディレクトリを用意する。
 ///
@@ -42,17 +16,13 @@ pub async fn ensure_dest_dir(dir: &Path, auto_create: bool, label: &str) -> Resu
     }
     if !auto_create {
         return Err(AppError::Action(format!(
-            "{label}フォルダが存在しません（auto_create = false のため自動作成しません）: {}",
-            crate::path_fmt::for_log(dir)
+            "{label}フォルダ '{}' が存在しません（auto_create = false のため作成しません）",
+            for_log(dir)
         )));
     }
-    tokio::fs::create_dir_all(dir).await.map_err(|e| {
-        AppError::Action(format!(
-            "{label}フォルダの作成に失敗 ({}): {}",
-            crate::path_fmt::for_log(dir),
-            e
-        ))
-    })
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|e| AppError::Action(format!("{label}フォルダ '{}' を作成できません: {e}", for_log(dir))))
 }
 
 /// 宛先ファイルの親ディレクトリを用意する。中身は [`ensure_dest_dir`] と同じ。
@@ -67,15 +37,17 @@ pub async fn ensure_parent_dir(dest: &Path, auto_create: bool, label: &str) -> R
 pub async fn hash_file_blake3(path: &Path) -> Result<blake3::Hash, AppError> {
     let path = path.to_path_buf();
     tokio::task::spawn_blocking(move || -> Result<blake3::Hash, AppError> {
-        let mut file = std::fs::File::open(&path)
-            .map_err(|e| AppError::FileHash(format!("ファイルオープン失敗 ({}): {}", crate::path_fmt::for_log(&path), e)))?;
+        let mut file = std::fs::File::open(&path).map_err(|e| {
+            AppError::Action(format!("内容の検証のためにファイル '{}' を開けません: {e}", for_log(&path)))
+        })?;
         let mut hasher = blake3::Hasher::new();
-        std::io::copy(&mut file, &mut hasher)
-            .map_err(|e| AppError::FileHash(format!("読み込み失敗 ({}): {}", crate::path_fmt::for_log(&path), e)))?;
+        std::io::copy(&mut file, &mut hasher).map_err(|e| {
+            AppError::Action(format!("内容の検証のためにファイル '{}' を読み込めません: {e}", for_log(&path)))
+        })?;
         Ok(hasher.finalize())
     })
     .await
-    .map_err(|e| AppError::FileHash(format!("ハッシュ計算タスク失敗: {}", e)))?
+    .map_err(|e| AppError::Action(format!("内容の検証を完了できません: {e}")))?
 }
 
 /// 1 回分のファイルコピー試行（`tokio::fs::copy` + BLAKE3 整合性検証）。
@@ -84,17 +56,16 @@ pub async fn hash_file_blake3(path: &Path) -> Result<blake3::Hash, AppError> {
 pub async fn try_copy_once(src: &Path, dest: &Path, verify_integrity: bool) -> Result<Option<blake3::Hash>, AppError> {
     tokio::fs::copy(src, dest)
         .await
-        .map_err(|e| AppError::Action(format!("ファイルのコピーに失敗: {}", e)))?;
+        // 呼び出し側が「コピーに失敗しました: 元 → 先: 」と前に付けるので、ここは OS のエラーだけ。
+        .map_err(|e| AppError::Action(e.to_string()))?;
 
     if verify_integrity {
         let src_hash = hash_file_blake3(src).await?;
         let dest_hash = hash_file_blake3(dest).await?;
         if src_hash != dest_hash {
-            return Err(AppError::FileHash(format!(
-                "BLAKE3 不一致: src={} dest={}",
-                crate::path_fmt::for_log(src),
-                crate::path_fmt::for_log(dest)
-            )));
+            return Err(AppError::Action(
+                "コピー後の内容が元のファイルと一致しません（BLAKE3 で比較）".to_string(),
+            ));
         }
         Ok(Some(src_hash))
     } else {
@@ -113,27 +84,19 @@ pub fn resolve_dest_path(
     if preserve_structure {
         let rel = src
             .strip_prefix(watch_path)
-            .map_err(|e| AppError::Action(format!("relative_path の解決に失敗: {}", e)))?;
+            .map_err(|_| relative_path_error(src, watch_path))?;
         Ok(dest_root.join(rel))
     } else {
         let file_name = src
             .file_name()
-            .ok_or_else(|| AppError::Action("ファイル名の取得に失敗".to_string()))?;
+            .ok_or_else(|| AppError::Action(format!("'{}' からファイル名を取り出せません", for_log(src))))?;
         Ok(dest_root.join(file_name))
     }
 }
 
-/// `action.destination` をプレースホルダー展開して `PathBuf` で返す。
-pub fn expand_action_destination(
-    action: &ActionConfig,
-    ctx: &PlaceholderContext,
-) -> Result<PathBuf, AppError> {
-    let raw = action
-        .destination
-        .as_deref()
-        .ok_or_else(|| AppError::Action("destination が未指定".to_string()))?;
-    let expanded = expand_placeholders(raw, ctx)?;
-    Ok(PathBuf::from(expanded))
+/// `destination` をプレースホルダー展開して `PathBuf` で返す。
+pub fn expand_destination(transfer: &Transfer, ctx: &PlaceholderContext) -> PathBuf {
+    PathBuf::from(expand_placeholders(&transfer.destination, ctx))
 }
 
 /// `src_dir` 配下を再帰的に列挙し、`(サブディレクトリ, ファイル)` に分けて返す
@@ -157,7 +120,7 @@ pub async fn walk_entries(src_dir: &Path) -> Result<(Vec<PathBuf>, Vec<PathBuf>)
         (dirs, files)
     })
     .await
-    .map_err(|e| AppError::Action(format!("walkdir タスク失敗: {}", e)))
+    .map_err(|e| AppError::Action(format!("フォルダ '{}' の中身を列挙できません: {e}", for_log(src_dir))))
 }
 
 /// フォルダごと転送するときの宛先フォルダを決める。
@@ -173,15 +136,24 @@ pub(super) fn resolve_folder_dest(
     } else {
         let folder_name = src_dir
             .file_name()
-            .ok_or_else(|| AppError::Action("フォルダ名の取得に失敗".to_string()))?;
+            .ok_or_else(|| AppError::Action(format!("'{}' からフォルダ名を取り出せません", for_log(src_dir))))?;
         Ok(dest_root.join(folder_name))
     }
 }
 
 /// `base` からの相対パスを取り出す。取れない場合はアクションエラーにする。
 pub(super) fn relative_to<'a>(path: &'a Path, base: &Path) -> Result<&'a Path, AppError> {
-    path.strip_prefix(base)
-        .map_err(|e| AppError::Action(format!("相対パスの解決に失敗 ({}): {}", crate::path_fmt::for_log(path), e)))
+    path.strip_prefix(base).map_err(|_| relative_path_error(path, base))
+}
+
+/// `path` が `base` の中に無く、相対パスを作れないときのエラー。
+/// `preserve_structure = true` で、監視フォルダの外のパスが来たときに起きる。
+fn relative_path_error(path: &Path, base: &Path) -> AppError {
+    AppError::Action(format!(
+        "'{}' は '{}' の中に無いため、フォルダ構造を保ったまま転送できません",
+        for_log(path),
+        for_log(base)
+    ))
 }
 
 #[cfg(test)]

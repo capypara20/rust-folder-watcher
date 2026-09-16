@@ -42,8 +42,8 @@ const AFTER_LONG_HELP: &str = "\
 
 \x1b[33;1m▶ プレースホルダー\x1b[0m  \x1b[2m（rules.toml の destination / command / args などで使用可）\x1b[0m
   \x1b[32m{FullName}\x1b[0m         ファイルのフルパス
-  \x1b[32m{Name}\x1b[0m             ファイル名（拡張子なし）
-  \x1b[32m{BaseName}\x1b[0m         ファイル名（拡張子あり）
+  \x1b[32m{Name}\x1b[0m             ファイル名（拡張子あり）
+  \x1b[32m{BaseName}\x1b[0m         ファイル名（拡張子なし）
   \x1b[32m{Extension}\x1b[0m        拡張子
   \x1b[32m{DirectoryName}\x1b[0m    親ディレクトリのフルパス
   \x1b[32m{WatchPath}\x1b[0m        監視ルートパス
@@ -107,20 +107,19 @@ fn main() {
 
     if !args.init.is_empty() {
         if args.init.len() > 1 && args.output.is_some() {
-            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-            eprintln!("{}", format!("[{ts}] [ERROR] --init を複数指定する場合は --output を同時に使用できません").red().bold());
-            std::process::exit(1);
+            exit_with(&AppError::Usage(
+                "--init を複数指定する場合は --output を同時に使用できません".to_string(),
+            ));
         }
-        let mut had_error = false;
+        let mut first_error = None;
         for init_type in &args.init {
             if let Err(e) = run_init(init_type, args.output.as_deref()) {
-                let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-                eprintln!("{}", format!("[{ts}] [ERROR] {e}").red().bold());
-                had_error = true;
+                print_error(&e);
+                first_error.get_or_insert(e);
             }
         }
-        if had_error {
-            std::process::exit(1);
+        if let Some(e) = first_error {
+            std::process::exit(e.exit_code());
         }
         return;
     }
@@ -130,21 +129,28 @@ fn main() {
         .build()
     {
         Ok(rt) => rt,
-        Err(e) => {
-            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-            eprintln!("{}", format!("[{ts}] [ERROR] tokioランタイム作成失敗: {e}").red().bold());
-            std::process::exit(1);
-        }
+        Err(e) => exit_with(&AppError::Runtime(format!("非同期ランタイムを作成できません: {e}"))),
     };
 
     match rt.block_on(run(&args)) {
         Ok(_) => std::process::exit(0),
-        Err(e) => {
-            let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
-            eprintln!("{}", format!("[{ts}] [ERROR] 実行エラー: {e}").red().bold());
-            std::process::exit(1);
-        }
+        Err(e) => exit_with(&e),
     };
+}
+
+/// エラーを表示する。
+///
+/// 前置きは `[ERROR]` だけにする。「実行エラー:」のような前置きを足すと、
+/// エラー自身の文面と重なって読みにくくなる（以前は 3 重になっていた）。
+fn print_error(e: &AppError) {
+    let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
+    eprintln!("{}", format!("[{ts}] [ERROR] {e}").red().bold());
+}
+
+/// エラーを表示し、その種類に応じた終了コードで終わる。
+fn exit_with(e: &AppError) -> ! {
+    print_error(e);
+    std::process::exit(e.exit_code());
 }
 
 async fn run(cli: &Args) -> Result<(), AppError> {
@@ -152,14 +158,7 @@ async fn run(cli: &Args) -> Result<(), AppError> {
     let global_path = config::resolve_config_path(cli.global.clone(), "global.toml", "--global")?;
     let rules_path = config::resolve_config_path(cli.rules.clone(), "rules.toml", "--rules")?;
 
-    let global_config = config::load_global_config(&global_path)?;
-    let mut rules_conf = config::load_rules_config(&rules_path)?;
-    // global 側の既定値をアクションへ焼き込んでから検証する
-    // （バリデーションと実行時が同じ値を見るようにするため）。
-    config::apply_global_defaults(&global_config, &mut rules_conf);
-
-    config::validate_global_config(&global_config)?;
-    config::validate_rules_config(&rules_conf)?;
+    let (global_config, rules_conf) = config::load(&global_path, &rules_path)?;
 
     if cli.validate {
         let ts = Local::now().format("%Y-%m-%d %H:%M:%S");
@@ -221,19 +220,23 @@ fn run_init(init_type: &InitType, output: Option<&std::path::Path>) -> Result<()
     };
 
     if let Some(path) = output {
-        std::fs::write(path, content)
-            .map_err(|e| AppError::Config(format!("ファイルの書き込みに失敗: {e}")))?;
+        std::fs::write(path, content).map_err(|source| AppError::TemplateWrite {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         println!("{}", format!("[{ts}] [INFO]    テンプレートを出力しました: {}", path.display()).cyan());
     } else {
         let path = std::path::Path::new(default_name);
         if path.exists() {
-            return Err(AppError::Config(format!(
+            return Err(AppError::Usage(format!(
                 "{default_name} が既に存在します。上書きする場合は --output で明示的にパスを指定してください"
             )));
         }
-        std::fs::write(path, content)
-            .map_err(|e| AppError::Config(format!("ファイルの書き込みに失敗: {e}")))?;
+        std::fs::write(path, content).map_err(|source| AppError::TemplateWrite {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         println!("{}", format!("[{ts}] [INFO]    テンプレートを出力しました: {default_name}").cyan());
     }
