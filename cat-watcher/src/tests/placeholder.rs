@@ -75,7 +75,7 @@ fn test_validate_known_inputs_ok() {
 #[test]
 fn test_validate_unknown_placeholder_error_contains_context() {
     let result = validate_placeholders("{Bad}", "my-rule", "action.command");
-    let err_msg = result.unwrap_err().to_string();
+    let err_msg = result.unwrap_err();
     assert!(err_msg.contains("my-rule"));
     assert!(err_msg.contains("action.command"));
     assert!(err_msg.contains("{Bad}"));

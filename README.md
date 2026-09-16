@@ -149,7 +149,10 @@ path = "C:\catwatcher\watch"    # \c と \w は TOML の正規エスケープで
 ```
 
 ```
-TOML パースエラー: invalid escape sequence
+設定ファイルの書き方に誤りがあります: C:\catwatcher\rules.toml
+TOML parse error at line 6, column 25
+...
+invalid escape sequence
 expected `b`, `f`, `n`, `r`, `t`, `u`, `U`, `\`, `"`
 ```
 
@@ -639,7 +642,8 @@ sc delete cat-watcher
   --global : C:\catwatcher\global.toml
   --rules  : C:\catwatcher\rules.toml
   実行アカウント : NT AUTHORITY\SYSTEM (S-1-5-18)
-  エラー : TOML パースエラー: TOML parse error at line 6, column 25
+  エラー : 設定ファイルの書き方に誤りがあります: C:\catwatcher\rules.toml
+TOML parse error at line 6, column 25
     |
   6 | path             = "C:\catwatcher\watch"
     |                         ^
@@ -659,9 +663,14 @@ sc query cat-watcher
 
 | 終了コード | 意味 |
 |---|---|
-| `10` | 設定ファイルの読み込み・パース・バリデーションに失敗 |
-| `11` | ログの初期化に失敗（出力先が作れない等） |
-| `12` | 監視の実行中に致命的エラー |
+| `10` | 起動前の準備に失敗（引数の不足、設定ファイルが見つからない・読めない・書き方の誤り・内容の問題） |
+| `12` | 起動後の実行中に失敗（ファイル監視の開始・継続、サービス制御など） |
+
+CLI で起動した場合も、同じ終了コードで終わります（`--help` の表示だけは `2`）。
+
+> v2.2.0 までは、設定ファイルが**読めない**ときに `11`（ログの初期化に失敗）が返っていました。
+> 実際にはログの初期化とは関係が無かったため、`11` は使わなくなりました。
+
 **実行アカウントの確認**:
 
 起動時にシステムログへ実行アカウントを出します。SID も併記するので、
@@ -781,13 +790,15 @@ systemctl status cat-watcher
 
 ## バリデーション
 
-`--validate` フラグを付けると、設定ファイルの妥当性チェックのみ実行して終了します。複数の問題があるときはすべて一覧で表示されます。
+`--validate` フラグを付けると、設定ファイルの妥当性チェックのみ実行して終了します。
+問題はファイルごとにすべて一覧で表示されます（`global.toml` と `rules.toml` の両方に問題があれば、両方まとめて出ます）。
 
 ```
-バリデーションエラーが 3 件見つかりました:
+設定に 1 件の問題があります: C:\catwatcher\global.toml
   [1] system_log.dir が存在しません: C:\logs\app
-  [2] 監視ルール名 csv-backup の watch.path が存在しません: C:\data\incoming
-  [3] 監視ルール名 log-processor のアクションの type が Command のとき、shell を定義してください
+設定に 2 件の問題があります: C:\catwatcher\rules.toml
+  [1] 監視ルール名 csv-backup の watch.path が存在しません: C:\data\incoming
+  [2] 監視ルール名 log-processor のアクションの type が command のとき、shell(コマンドを実行するシェル) を定義してください
 ```
 
 ### 実行ファイルの存在チェック

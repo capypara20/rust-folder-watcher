@@ -86,9 +86,13 @@ pub struct CompiledRule{
 fn build_glob_set(patterns: &[String]) -> Result<GlobSet, AppError> {
 	let mut builder = GlobSetBuilder::new();
 	for p in patterns {
-		builder.add(Glob::new(p).map_err(|e| AppError::Watch(e.to_string()))?);
+		builder.add(
+			Glob::new(p).map_err(|e| AppError::Watch(format!("パターン '{p}' を解釈できません: {e}")))?,
+		);
 	}
-	builder.build().map_err(|e| AppError::Watch(e.to_string()))
+	builder
+		.build()
+		.map_err(|e| AppError::Watch(format!("パターンを組み立てられません: {e}")))
 }
 
 /// 空リストを「フィルタ指定なし」として扱う版。
@@ -109,7 +113,9 @@ fn build_glob_set_if_any(patterns: &[String]) -> Result<Option<GlobSet>, AppErro
 /// regex / exclude_regex / dir_regex / exclude_dir_regex の 4 種で共用する。
 fn build_regex(pattern: Option<&str>) -> Result<Option<Regex>, AppError> {
 	pattern
-		.map(|re| Regex::new(re).map_err(|e| AppError::Watch(e.to_string())))
+		.map(|re| {
+			Regex::new(re).map_err(|e| AppError::Watch(format!("正規表現 '{re}' を解釈できません: {e}")))
+		})
 		.transpose()
 }
 

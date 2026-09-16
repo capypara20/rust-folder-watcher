@@ -13,20 +13,17 @@ mod types;
 mod validate;
 
 pub use action::Action;
-pub use loader::{
-	apply_global_defaults, find_config_file, load_global_config, load_rules_config,
-	resolve_config_path,
-};
+pub use loader::{find_config_file, load, resolve_config_path};
 pub use model::*;
 pub use types::*;
-pub use validate::{validate_global_config, validate_rules_config};
 
 // テスト（`tests` は `super::*` でこのモジュールのスコープを参照する）から
 // 呼ぶ内部ヘルパとエラー型をスコープへ持ち込む。本体では使わないため cfg(test)。
 #[cfg(test)]
-use crate::error::AppError;
-#[cfg(test)]
-use validate::{collect_action_errors, finish_validation, static_root_of_destination};
+use validate::{
+	collect_action_errors, finish_validation, static_root_of_destination, validate_global_config,
+	validate_rules_config, Problems,
+};
 
 #[cfg(test)]
 #[path = "../tests/config.rs"]

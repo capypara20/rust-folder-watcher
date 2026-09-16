@@ -10,21 +10,20 @@ use super::action::{missing_fields, rejected_fields};
 use super::model::{ActionConfig, GlobalConfig, RulesConfig};
 use super::types::ActionType;
 use crate::actions::command::VALID_SHELLS;
-use crate::error::AppError;
 use crate::placeholder::validate_placeholders;
 
-pub(crate) fn finish_validation(errors: Vec<String>) -> Result<(), AppError> {
+/// 検証の結果。問題が 1 件も無ければ `Ok`。
+///
+/// どのファイルの問題かはここでは分からない（設定の値だけを見ている）ので、
+/// ファイルパスを付けて `AppError` にするのは読み込み側（`config::load`）の役目。
+pub type Problems = Vec<String>;
+
+pub(crate) fn finish_validation(errors: Problems) -> Result<(), Problems> {
 	if errors.is_empty() {
-		return Ok(());
+		Ok(())
+	} else {
+		Err(errors)
 	}
-	if errors.len() == 1 {
-		return Err(AppError::Validation(errors.into_iter().next().unwrap()));
-	}
-	let mut msg = format!("バリデーションエラーが {} 件見つかりました:\n", errors.len());
-	for (i, e) in errors.iter().enumerate() {
-		msg.push_str(&format!("  [{}] {}\n", i + 1, e));
-	}
-	Err(AppError::Validation(msg.trim_end().to_string()))
 }
 
 /// ログの出力先ディレクトリとファイル名を検証する共通ヘルパ。
@@ -63,7 +62,7 @@ fn validate_log_target(
 	}
 }
 
-pub fn validate_global_config(config: &GlobalConfig) -> Result<(), AppError> {
+pub fn validate_global_config(config: &GlobalConfig) -> Result<(), Problems> {
 	let mut errors = Vec::new();
 	validate_log_target(
 		&config.system_log.dir,
@@ -127,7 +126,7 @@ fn collect_exclusive_error(
 	}
 }
 
-pub fn validate_rules_config(config: &RulesConfig) -> Result<(), AppError> {
+pub fn validate_rules_config(config: &RulesConfig) -> Result<(), Problems> {
 	let mut errors = Vec::new();
 	let rules = &config.rules;
 
@@ -406,14 +405,14 @@ fn collect_action_placeholder_errors(action: &ActionConfig, rule_name: &str, err
 	for (field_name, field_value) in fields {
 		if let Some(value) = field_value {
 			if let Err(e) = validate_placeholders(value, rule_name, field_name) {
-				errors.push(e.to_string());
+				errors.push(e);
 			}
 		}
 	}
 	if let Some(args) = &action.args {
 		for (index, arg) in args.iter().enumerate() {
 			if let Err(e) = validate_placeholders(arg, rule_name, &format!("action.args[{}]", index)) {
-				errors.push(e.to_string());
+				errors.push(e);
 			}
 		}
 	}

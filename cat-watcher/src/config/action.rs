@@ -357,7 +357,7 @@ impl MissingField {
 
 impl From<MissingField> for AppError {
     fn from(e: MissingField) -> Self {
-        AppError::Validation(format!("{}({}) が未指定", e.key, e.description))
+        AppError::Action(format!("{}({}) が未指定", e.key, e.description))
     }
 }
 

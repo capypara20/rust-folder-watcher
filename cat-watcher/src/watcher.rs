@@ -39,7 +39,7 @@ pub async fn start_watching(
     let mut watcher = recommended_watcher(move |res| {
         let _ = tx.blocking_send(res);
     })
-    .map_err(|e| AppError::Watch(format!("watcher 作成失敗: {}", e)))?;
+    .map_err(|e| AppError::Watch(format!("ファイル監視を開始できません: {e}")))?;
 
     let mut watch_map: HashMap<PathBuf, RecursiveMode> = HashMap::new();
     for rule in rules {
@@ -122,7 +122,10 @@ pub async fn start_watching(
 
     for (path, mode) in &watch_map {
         watcher.watch(path, *mode).map_err(|e| {
-            AppError::Watch(format!("watcher 監視登録失敗 ({}): {}", path.display(), e))
+            AppError::Watch(format!(
+                "フォルダを監視対象に登録できません: {}: {e}",
+                crate::path_fmt::for_log(path)
+            ))
         })?;
     }
 

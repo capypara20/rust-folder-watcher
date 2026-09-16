@@ -1,4 +1,5 @@
 use super::*;
+use crate::error::AppError;
 use crate::test_support::base_action;
 use tempfile::tempdir;
 
@@ -7,7 +8,7 @@ fn sanitize_path(path: &std::path::Path) -> String {
 }
 
 /// collect_action_errors を単体で呼ぶテスト用ラッパー
-fn validate_action(action: &ActionConfig, rule_name: &str) -> Result<(), AppError> {
+fn validate_action(action: &ActionConfig, rule_name: &str) -> Result<(), Problems> {
 	let mut errors = Vec::new();
 	collect_action_errors(action, rule_name, &mut errors);
 	finish_validation(errors)
@@ -62,7 +63,7 @@ fn make_rules_toml(watch_path: &str, action_block: &str) -> String {
 	rule_toml("test-rule", watch_path, r#""create", "modify""#, action_block)
 }
 
-fn validate_toml(toml_str: &str) -> Result<(), AppError> {
+fn validate_toml(toml_str: &str) -> Result<(), Problems> {
 	let config: RulesConfig = toml::from_str(toml_str).unwrap();
 	validate_rules_config(&config)
 }
@@ -757,7 +758,7 @@ fn execute_action(program: &str) -> ActionConfig {
 fn execute_program_not_on_path_is_rejected() {
 	let action = execute_action("cat-watcher-definitely-not-a-real-command-xyz");
 	let err = validate_action(&action, "r").expect_err("PATH に無い program は弾くこと");
-	let msg = err.to_string();
+	let msg = err.join(" ");
 	assert!(msg.contains("PATH 上で見つかりません"), "{msg}");
 }
 
@@ -779,7 +780,7 @@ fn execute_absolute_program_that_is_missing_is_rejected() {
 	let missing = dir.path().join("nested").join("tool.exe");
 	let action = execute_action(missing.to_str().unwrap());
 	let err = validate_action(&action, "r").expect_err("存在しない絶対パスは弾くこと");
-	assert!(err.to_string().contains("存在しません"), "{err}");
+	assert!(err.join(" ").contains("存在しません"), "{err:?}");
 }
 
 /// この OS で使えるシェルは、実体が見つかるので通ること。
@@ -794,4 +795,113 @@ fn command_shell_executable_is_found() {
 		validate_action(&a, "r").is_ok(),
 		"この OS の既定シェルを弾いてしまった"
 	);
+}
+
+// =========================================================
+// config::load: 読み込み・書式・内容のエラーにファイルが分かる形で付くこと
+// =========================================================
+
+/// 検証が通る global.toml を書き出す。ログ出力先には実在するフォルダが要る。
+fn write_valid_global(dir: &std::path::Path) -> std::path::PathBuf {
+	let path = dir.join("global.toml");
+	std::fs::write(
+		&path,
+		format!(
+			r#"
+			[retry]
+			count = 1
+			interval_ms = 10
+
+			[system_log]
+			dir = "{}"
+			file_name = "system.log"
+			rotation = "daily"
+			level = "info"
+			"#,
+			sanitize_path(dir)
+		),
+	)
+	.unwrap();
+	path
+}
+
+fn write_valid_rules(dir: &std::path::Path) -> std::path::PathBuf {
+	let path = dir.join("rules.toml");
+	std::fs::write(&path, make_rules_toml(&sanitize_path(dir), &cmd_action())).unwrap();
+	path
+}
+
+#[test]
+fn load_succeeds_with_valid_files() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let rules = write_valid_rules(dir.path());
+	let (_, rules_conf) = load(&global, &rules).expect("正しい設定は読み込めること");
+	assert_eq!(rules_conf.rules.len(), 1);
+}
+
+/// 読めないファイルは ConfigRead になり、そのパスを持つこと。
+///
+/// 以前は `?` で `io::Error` がそのまま上がり、どのファイルか分からないうえ
+/// 終了コードも「ログの初期化に失敗」になっていた。
+#[test]
+fn load_reports_which_file_could_not_be_read() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let missing = dir.path().join("no-such-rules.toml");
+
+	match load(&global, &missing) {
+		Err(AppError::ConfigRead { path, .. }) => assert_eq!(path, missing),
+		other => panic!("ConfigRead を期待したが {other:?}"),
+	}
+}
+
+/// TOML の書き間違いは ConfigParse になり、そのパスを持つこと。
+#[test]
+fn load_reports_which_file_has_a_syntax_error() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let rules = dir.path().join("rules.toml");
+	std::fs::write(&rules, "[[rules]\nname = ").unwrap();
+
+	match load(&global, &rules) {
+		Err(AppError::ConfigParse { path, .. }) => assert_eq!(path, rules),
+		other => panic!("ConfigParse を期待したが {other:?}"),
+	}
+}
+
+/// global と rules の両方に問題があれば、両方をまとめて報告すること。
+/// 片方で止めると、直して再実行したあとにもう片方の問題が出てくる。
+#[test]
+fn load_reports_problems_in_both_files_at_once() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	// ログ出力先を実在しないフォルダにして global を不正にする
+	let text = std::fs::read_to_string(&global).unwrap();
+	let broken = text.replace(&sanitize_path(dir.path()), &format!("{}/missing", sanitize_path(dir.path())));
+	std::fs::write(&global, broken).unwrap();
+	// ルール 0 件で rules も不正にする
+	let rules = dir.path().join("rules.toml");
+	std::fs::write(&rules, "rules = []\n").unwrap();
+
+	match load(&global, &rules) {
+		Err(AppError::ConfigInvalid(files)) => {
+			let paths: Vec<_> = files.iter().map(|f| f.path.clone()).collect();
+			assert_eq!(paths, vec![global, rules], "両方のファイルが報告されていない");
+			assert!(files.iter().all(|f| !f.problems.is_empty()));
+		}
+		other => panic!("ConfigInvalid を期待したが {other:?}"),
+	}
+}
+
+/// 既定の設定ファイルが見つからないとき、実際に探したパスを出すこと。
+#[test]
+fn missing_default_config_lists_searched_locations() {
+	let name = "cat-watcher-no-such-config-file.toml";
+	let err = resolve_config_path(None, name, "--global").unwrap_err();
+	let text = err.to_string();
+	assert!(matches!(err, AppError::Usage(_)), "{err:?}");
+	assert!(text.contains("--global"), "{text}");
+	assert!(text.contains("探した場所"), "{text}");
+	assert!(text.matches(name).count() >= 2, "探した場所のパスが出ていない: {text}");
 }

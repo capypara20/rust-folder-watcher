@@ -53,19 +53,6 @@ fn service_main(arguments: Vec<OsString>) {
     }
 }
 
-/// サービスの終了コード。`sc query` から見えるので、原因の種類が区別できるようにする。
-///
-/// 従来は常に `Win32(1)`（= `ERROR_INVALID_FUNCTION`「ファンクションが間違っています」）
-/// で、イベントログを見ても何も分からなかった。
-mod exit_code {
-    /// 設定ファイルの読み込み・パース・バリデーションに失敗した。
-    pub const CONFIG: u32 = 10;
-    /// ログの初期化に失敗した（出力先が作れない等）。
-    pub const LOG: u32 = 11;
-    /// 監視の実行中に致命的エラーが起きた。
-    pub const RUNTIME: u32 = 12;
-}
-
 /// 起動失敗の内容を書き出すファイル名。
 const STARTUP_ERROR_LOG: &str = "cat-watcher-startup-error.log";
 
@@ -128,13 +115,14 @@ fn append_text(path: &Path, body: &str) -> std::io::Result<()> {
     f.write_all(body.as_bytes())
 }
 
-/// `AppError` から終了コードを決める。
+/// `AppError` から、SCM に報告するサービス固有の終了コードを決める。
+///
+/// 値そのものは CLI と共通（`AppError::exit_code`）。`sc query` の
+/// `SERVICE_EXIT_CODE` に出るので、設定の問題か実行中の問題かを区別できる。
+/// 以前は常に `Win32(1)`（「ファンクションが間違っています」）で何も分からなかった。
 fn exit_code_for(err: &AppError) -> u32 {
-    match err {
-        AppError::Config(_) | AppError::Validation(_) | AppError::TomlParse(_) => exit_code::CONFIG,
-        AppError::Io(_) => exit_code::LOG,
-        _ => exit_code::RUNTIME,
-    }
+    // exit_code は常に正の値だが、万一 0 以下なら「失敗」を保つため 1 にする。
+    u32::try_from(err.exit_code()).ok().filter(|c| *c != 0).unwrap_or(1)
 }
 
 fn run_service(arguments: &[OsString]) -> Result<(), AppError> {
@@ -163,7 +151,7 @@ fn run_service(arguments: &[OsString]) -> Result<(), AppError> {
         .unwrap_or(SERVICE_NAME);
 
     let status_handle = service_control_handler::register(service_name, event_handler)
-        .map_err(|e| AppError::Config(format!("SCM登録失敗: {e}")))?;
+        .map_err(|e| AppError::Runtime(format!("サービス制御マネージャーに登録できません: {e}")))?;
 
     let result = run_watcher(status_handle, stop_rx);
 
@@ -237,17 +225,12 @@ fn run_watcher_inner(
     let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
-        .map_err(|e| AppError::Config(format!("tokioランタイム作成失敗: {e}")))?;
+        .map_err(|e| AppError::Runtime(format!("非同期ランタイムを作成できません: {e}")))?;
 
     rt.block_on(async {
         set_start_pending(status_handle, 2);
 
-        let global_config = config::load_global_config(&args.global)?;
-        let mut rules_conf = config::load_rules_config(&args.rules)?;
-        config::apply_global_defaults(&global_config, &mut rules_conf);
-
-        config::validate_global_config(&global_config)?;
-        config::validate_rules_config(&rules_conf)?;
+        let (global_config, rules_conf) = config::load(&args.global, &args.rules)?;
 
         // サービスモードではコンソール出力を無効化する（allow_console=false）
         let (log, log_handle) = Logger::new_system(&global_config.system_log, false)?;
@@ -270,7 +253,7 @@ fn run_watcher_inner(
                 wait_hint: Duration::default(),
                 process_id: None,
             })
-            .map_err(|e| AppError::Config(format!("サービス状態設定失敗: {e}")))?;
+            .map_err(|e| AppError::Runtime(format!("サービスの状態を通知できません: {e}")))?;
         started.store(true, Ordering::SeqCst);
 
         // 実行アカウントを最初に出す。ネットワーク共有が見えない／外部プロセスが
@@ -342,7 +325,7 @@ fn parse_service_args() -> Result<ServiceArgs, AppError> {
                 if i < args.len() {
                     global = Some(PathBuf::from(&args[i]));
                 } else {
-                    return Err(AppError::Config("--global の値が未指定です".to_string()));
+                    return Err(AppError::Usage("--global の値が指定されていません".to_string()));
                 }
             }
             Some("--rules") | Some("-r") => {
@@ -350,7 +333,7 @@ fn parse_service_args() -> Result<ServiceArgs, AppError> {
                 if i < args.len() {
                     rules = Some(PathBuf::from(&args[i]));
                 } else {
-                    return Err(AppError::Config("--rules の値が未指定です".to_string()));
+                    return Err(AppError::Usage("--rules の値が指定されていません".to_string()));
                 }
             }
             _ => {}
