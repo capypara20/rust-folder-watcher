@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use chrono::Local;
+use chrono::{Local, NaiveDateTime};
 use colored::Colorize;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -12,10 +12,58 @@ use super::format::{console_print, file_line};
 use super::{LogEntry, LogKind};
 use crate::config::{LogLevel, LogRotation};
 
-fn build_log_path(log_dir: &str, log_file_name: &str) -> PathBuf {
-    let now = Local::now();
+/// 書き込み先のログファイル。ファイル名を**いつ決め直すか**を受け持つ。
+///
+/// 以前は書き出すたびに現在時刻で `{Date}` / `{DateTime}` を置き換えていた（#100）。
+/// そのため `rotation = "never"` でも日付が変わると別ファイルになり、
+/// `{DateTime}` にいたっては書き出すたびに別ファイルになっていた。
+///
+/// | rotation | ファイル名を決めるとき |
+/// |---|---|
+/// | `never` | 起動時の 1 回だけ。以降は変えない |
+/// | `daily` | 起動時と、日付が変わったとき |
+///
+/// 時刻は引数で受け取る（テストで日付の変わり目を作れるようにするため）。
+struct LogFile {
+    dir: String,
+    file_name: String,
+    rotation: LogRotation,
+    /// ファイル名を決めた日（`YYYYMMDD`）。
+    date: String,
+    path: PathBuf,
+}
+
+impl LogFile {
+    fn new(dir: &str, file_name: &str, rotation: LogRotation, now: NaiveDateTime) -> Self {
+        Self {
+            dir: dir.to_string(),
+            file_name: file_name.to_string(),
+            rotation,
+            date: date_of(now),
+            path: build_log_path(dir, file_name, now),
+        }
+    }
+
+    /// 日付が変わっていれば新しい日へ切り替え、`true` を返す。
+    ///
+    /// `never` では何もしない（ファイル名も連番も起動時のまま）。
+    fn roll_if_new_day(&mut self, now: NaiveDateTime) -> bool {
+        if !matches!(self.rotation, LogRotation::Daily) || date_of(now) == self.date {
+            return false;
+        }
+        self.date = date_of(now);
+        self.path = build_log_path(&self.dir, &self.file_name, now);
+        true
+    }
+}
+
+fn date_of(now: NaiveDateTime) -> String {
+    now.format("%Y%m%d").to_string()
+}
+
+fn build_log_path(log_dir: &str, log_file_name: &str, now: NaiveDateTime) -> PathBuf {
     let file_name = log_file_name
-        .replace("{Date}", &now.format("%Y%m%d").to_string())
+        .replace("{Date}", &date_of(now))
         .replace("{DateTime}", &now.format("%Y%m%d_%H%M%S").to_string());
     PathBuf::from(log_dir).join(file_name)
 }
@@ -59,7 +107,7 @@ pub(crate) async fn writer_task(
     console: bool,
     enabled: bool,
 ) {
-    let mut current_date = Local::now().format("%Y%m%d").to_string();
+    let mut log_file = LogFile::new(&log_dir, &log_file_name, log_rotation, Local::now().naive_local());
     // アクションログのブロック連番（日次ローテで #1 にリセット）。
     let mut block_seq: usize = 0;
 
@@ -74,11 +122,8 @@ pub(crate) async fn writer_task(
         }
 
         let now = Local::now();
-        let today = now.format("%Y%m%d").to_string();
-        // 日次ローテ: 日付が変わったら block_seq をリセットする。出力先パスは
-        // build_log_path が {Date} を差し替えるため自動的に当日のファイルへ向く。
-        if matches!(log_rotation, LogRotation::Daily) && today != current_date {
-            current_date = today;
+        // 日次ローテ: 日付が変わったらファイル名を決め直し、連番を #1 に戻す。
+        if log_file.roll_if_new_day(now.naive_local()) {
             block_seq = 0;
         }
         let ts = now.format("%Y-%m-%d %H:%M:%S").to_string();
@@ -114,10 +159,14 @@ pub(crate) async fn writer_task(
 
         // バッチをまとめて 1 回の open → write → close で書き出す。
         if enabled {
-            append_to_file(&build_log_path(&log_dir, &log_file_name), &file_buf).await;
+            append_to_file(&log_file.path, &file_buf).await;
         }
         if shutdown {
             break;
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/logger_writer.rs"]
+mod tests;
