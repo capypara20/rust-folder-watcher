@@ -31,6 +31,8 @@ pub(super) const ASSETS: &[Asset] = &[
     Asset { path: "/assets/app.js",     content_type: JS,  body: include_str!("assets/app.js") },
     Asset { path: "/assets/search.js",  content_type: JS,  body: include_str!("assets/search.js") },
     Asset { path: "/assets/render.js",  content_type: JS,  body: include_str!("assets/render.js") },
+    Asset { path: "/assets/detail.js",  content_type: JS,  body: include_str!("assets/detail.js") },
+    Asset { path: "/assets/columns.js", content_type: JS,  body: include_str!("assets/columns.js") },
 ];
 
 /// リクエストパスに対応するアセットを探す。

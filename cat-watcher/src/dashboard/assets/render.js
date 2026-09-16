@@ -25,27 +25,55 @@ export function buildDaySeparator(date) {
 }
 
 /**
- * パスを「親フォルダ」と「ファイル名」に分けて描く。
- * 幅が足りないときに削るのは親フォルダ側だけなので、
- * 一番知りたいファイル名は必ず残る。
+ * パスを「先頭・中ほど・ファイル名」の 3 つに割る。
+ *
+ *   C:\data\backup\2026\report.txt
+ *   └ head ┘└─ mid ─┘ └─ base ─┘
+ *
+ * 幅が足りないときに削るのは mid だけにして、
+ * 「どのドライブか」と「どのファイルか」は必ず残す。
+ * CSS の text-overflow は末尾にしか `…` を置けないので、
+ * 中略に見せるには要素を分けるしかない。
  */
+export function splitPath(path) {
+  const sepAt = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (sepAt < 0) return { head: "", mid: "", sep: "", base: path };
+
+  const sep = path[sepAt];
+  const dir = path.slice(0, sepAt); // 末尾の区切りは sep として別に持つ
+  const base = path.slice(sepAt + 1);
+
+  // 先頭の 1 区切りぶん（"C:\" や "/" など）は常に見せる。
+  // 両方の区切り文字が混ざっていても、より手前にある方を境目にする。
+  const cands = [dir.indexOf("/"), dir.indexOf("\\")].filter((i) => i >= 0);
+  if (!cands.length) return { head: dir, mid: "", sep, base };
+  const firstAt = Math.min(...cands);
+  return { head: dir.slice(0, firstAt + 1), mid: dir.slice(firstAt + 1), sep, base };
+}
+
 function appendPath(cell, path) {
-  const cut = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  const { head, mid, sep, base } = splitPath(path);
   const wrap = el("span", "path");
-  if (cut >= 0) {
-    const dir = el("span", "dir");
-    highlightInto(dir, path.slice(0, cut + 1));
-    wrap.appendChild(dir);
+
+  for (const [cls, text] of [["p-head", head], ["p-mid", mid], ["p-sep", sep]]) {
+    if (!text) continue;
+    const span = el("span", cls);
+    highlightInto(span, text);
+    wrap.appendChild(span);
   }
-  const base = el("span", "base");
-  highlightInto(base, cut >= 0 ? path.slice(cut + 1) : path);
-  wrap.appendChild(base);
+
+  const baseEl = el("span", "p-base");
+  highlightInto(baseEl, base);
+  wrap.appendChild(baseEl);
   cell.appendChild(wrap);
 }
 
 /** ライブ表示の 1 行。 */
 export function buildRow(ev) {
   const row = el("div", "row " + ev.kind);
+  // 詳細ドロワーが行から元のイベントを引けるようにしておく。
+  // 表示用に加工した文字列からは復元できないため。
+  row.__ev = ev;
   const { time } = splitTimestamp(ev.ts);
 
   row.appendChild(el("span", "c-time", time));
@@ -81,6 +109,13 @@ export function buildRow(ev) {
   }
   row.appendChild(body);
 
+  // 詳細を開くボタン。position:absolute なのでグリッドの列数には影響しない。
+  // グループ見出しはクリックが開閉に取られるので、そこではこれが唯一の入口になる。
+  const more = el("button", "rowmore", "⋯");
+  more.title = "詳細を開く";
+  more.tabIndex = -1;
+  row.appendChild(more);
+
   return row;
 }
 
@@ -112,6 +147,8 @@ export function buildGroupBlock(detectEv) {
   head.addEventListener("click", (e) => {
     // 本文中のテキスト選択を邪魔しない
     if (window.getSelection().toString()) return;
+    // 「⋯」は詳細を開くためのボタンなので、開閉には使わせない
+    if (e.target.closest(".rowmore")) return;
     setGroupOpen(block, !block.classList.contains("open"));
     e.preventDefault();
   });

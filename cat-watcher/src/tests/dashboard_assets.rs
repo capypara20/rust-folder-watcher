@@ -80,3 +80,41 @@ fn table_header_and_rows_share_column_definition() {
         );
     }
 }
+
+/// JS が `$("xxx")` / `getElementById("xxx")` で触っている要素が
+/// index.html に実在すること。
+///
+/// 欠けていても JS は例外で止まるだけで画面に何も出ないため、
+/// ブラウザの開発者ツールを開くまで気づけない。
+#[test]
+fn every_element_id_used_by_js_exists_in_html() {
+    let html = INDEX.body;
+    for asset in ASSETS.iter().filter(|a| a.path.ends_with(".js")) {
+        for id in element_ids_used(asset.body) {
+            assert!(
+                html.contains(&format!("id=\"{id}\"")),
+                "{} が参照している id=\"{id}\" が index.html に無い",
+                asset.path
+            );
+        }
+    }
+}
+
+/// `$("name")` と `getElementById("name")` から id を集める。
+fn element_ids_used(js: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    for prefix in ["$(\"", "getElementById(\""] {
+        let mut rest = js;
+        while let Some(start) = rest.find(prefix) {
+            rest = &rest[start + prefix.len()..];
+            let Some(end) = rest.find('"') else { break };
+            let id = &rest[..end];
+            // 変数を渡している呼び出しなど、リテラルでないものは拾わない
+            if !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+                found.push(id.to_string());
+            }
+            rest = &rest[end..];
+        }
+    }
+    found
+}

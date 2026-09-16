@@ -38,8 +38,6 @@
   --mark:     #ffd33d;
   --mark-cur: #ff9d3d;
 
-  /* テーブルの列幅。ヘッダーと本文が必ず同じ定義を使う */
-  --cols: 78px 62px 58px 132px minmax(160px, 1.1fr) minmax(220px, 2fr);
   --row-pad-x: 14px;
   --radius: 6px;
 }
@@ -141,7 +139,13 @@ button.tog.on { color: var(--accent); border-color: var(--accent); }
 #banner .ttl { font-weight: 600; }
 
 /* ---- 4. ログテーブル ------------------------------------- */
-.table { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+/* 列幅。ヘッダーと本文が必ず同じ定義を使う。
+   `--cols-user` はヘッダーの境界をドラッグしたときに columns.js が載せる
+   上書き。指定が無ければ既定の配分に戻る。 */
+.table {
+  flex: 1; display: flex; flex-direction: column; min-height: 0;
+  --cols: var(--cols-user, 78px 62px 58px 132px minmax(160px, 1.1fr) minmax(220px, 2fr));
+}
 
 .thead {
   display: grid;
@@ -154,7 +158,20 @@ button.tog.on { color: var(--accent); border-color: var(--accent); }
   font-size: 11px; font-weight: 600; letter-spacing: .4px;
   flex: none;
 }
-.th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.th { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; position: relative; }
+
+/* 列の境界。掴みやすいよう線より広い当たり判定にし、線自体はホバーで出す */
+.grip {
+  position: absolute; top: -5px; right: -7px; width: 11px; bottom: -5px;
+  cursor: col-resize; touch-action: none;
+}
+.grip::after {
+  content: ""; position: absolute; left: 5px; top: 0; bottom: 0; width: 1px;
+  background: var(--border);
+}
+.grip:hover::after { background: var(--accent); width: 2px; }
+/* ドラッグ中は画面のどこにいてもカーソルを保ち、文字が選ばれないようにする */
+body.resizing { cursor: col-resize; user-select: none; }
 
 .tbody { flex: 1; overflow-y: auto; overflow-x: hidden; }
 
@@ -170,6 +187,23 @@ button.tog.on { color: var(--accent); border-color: var(--accent); }
 }
 .row:nth-child(even) { background: var(--bg-alt); }
 .row:hover { background: rgba(255, 255, 255, .05); }
+.row { position: relative; cursor: pointer; }
+
+/* 詳細を開くボタン。ふだんは隠しておき、ホバーした行にだけ出す。
+   絶対配置なのでグリッドの列数には影響しない。 */
+.rowmore {
+  position: absolute; right: 2px; top: 50%; transform: translateY(-50%);
+  display: none; padding: 0 5px; line-height: 16px;
+  background: var(--panel); color: var(--muted);
+  border: 1px solid var(--border); border-radius: 4px;
+  font: inherit; font-size: 12px; cursor: pointer;
+}
+.row:hover .rowmore { display: block; }
+.rowmore:hover { color: var(--fg); border-color: var(--accent); }
+
+/* 詳細ドロワーに出している行 */
+.row.sel { background: rgba(74, 163, 255, .16) !important; }
+.row.sel .rowmore { display: block; }
 .row.detect { border-left-color: var(--detect); }
 .row.action { border-left-color: rgba(74, 163, 255, .35); }
 .row.flash { animation: flash 1.1s ease-out; }
@@ -260,18 +294,57 @@ button.tog.on { color: var(--accent); border-color: var(--accent); }
 .lv-block { color: var(--block); }
 .lv-action{ color: var(--action); }
 
-/* パスは「親フォルダを削り、ファイル名は必ず見せる」。
-   長いパスでも一番知りたい部分が消えないようにするため。 */
+/* パスは「真ん中だけを削る」。
+   先頭（C:\ など）とファイル名は残るので、どこの何かは常に読める。
+   削れるのは .p-mid だけ。flex-shrink を極端に大きくして、
+   ほかより先に縮ませている。 */
 .path { display: flex; min-width: 0; }
-.path .dir  { color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.path .base { flex: none; color: var(--fg); }
+.p-head { flex: 0 1 auto; flex-shrink: 1; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.p-mid  { flex: 0 1 auto; flex-shrink: 999; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.p-sep  { flex: none; color: var(--muted); }
+.p-base { flex: none; color: var(--fg); }
+
+/* 「折り返し」を入れたときはそのまま全部出す */
 .tbody.wrap .path { display: inline; }
-.tbody.wrap .path .dir { overflow: visible; white-space: pre-wrap; }
+.tbody.wrap .p-head,
+.tbody.wrap .p-mid { overflow: visible; white-space: pre-wrap; }
 
 .events { color: var(--warn); }
 
 mark { background: var(--mark); color: #1a1a1a; border-radius: 2px; padding: 0 1px; }
 mark.current { background: var(--mark-cur); outline: 1px solid rgba(255, 255, 255, .4); }
+
+/* ---- 5.5 詳細ドロワー ------------------------------------ */
+/* 画面下に固定。横幅をフルに使えるので、長いパスが 1 行で収まりやすい。 */
+.detail {
+  flex: none;
+  max-height: 38vh;
+  display: flex; flex-direction: column;
+  background: var(--panel);
+  border-top: 2px solid var(--accent);
+}
+
+.dt-head {
+  display: flex; align-items: center; gap: 10px;
+  padding: 5px var(--row-pad-x);
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.dt-title { font-weight: 600; color: var(--accent); white-space: nowrap; }
+.dt-hint  { color: var(--muted); font-size: 11px; white-space: nowrap; }
+
+.dt-body {
+  margin: 0; padding: 8px var(--row-pad-x) 12px;
+  overflow-y: auto;
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 3px 12px;
+  align-content: start;
+}
+.dt-body dt { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .4px; padding-top: 1px; }
+.dt-body dd { margin: 0; user-select: text; white-space: pre-wrap; }
+/* パスやコマンドは区切りの無い長い 1 語になりうるので、どこでも折る */
+.dt-body dd.wrapany { overflow-wrap: anywhere; }
 
 /* ---- 6. 過去ログ表示 ------------------------------------- */
 /* 列の意味が違うので、専用のグリッドにする */
@@ -304,4 +377,10 @@ mark.current { background: var(--mark-cur); outline: 1px solid rgba(255, 255, 25
   .row .c-level { grid-column: 2; }
   .hrow .hline { grid-column: 1 / -1; }
   .group.grow { min-width: 0; }
+  /* カード表示では列が 3 つに組み替わるので、幅の調整は意味を持たない */
+  .grip { display: none; }
+  /* 画面が小さいぶん、ドロワーに取られる高さを抑える */
+  .detail { max-height: 50vh; }
+  .dt-body { grid-template-columns: minmax(0, 1fr); gap: 0 0; }
+  .dt-body dt { padding-top: 6px; }
 }

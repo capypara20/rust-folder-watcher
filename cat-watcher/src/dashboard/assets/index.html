@@ -76,6 +76,19 @@
   </div>
 </div>
 
+<!-- 表は 1 行に収める都合で必ず見切れる。全文はここで読む。 -->
+<section class="detail" id="detail" hidden aria-label="選択した行の詳細">
+  <div class="dt-head">
+    <span class="dt-title">▼ 詳細</span>
+    <span class="dt-hint">↑ ↓ で前後の行へ / Esc で閉じる</span>
+    <div class="spacer"></div>
+    <button id="dtCopyPath" title="対象のフルパスだけコピー">📋 パス</button>
+    <button id="dtCopy" title="全項目をテキストでコピー">📋 すべて</button>
+    <button id="dtClose" class="icon" title="閉じる (Esc)">✕</button>
+  </div>
+  <dl class="dt-body" id="dtBody"></dl>
+</section>
+
 <script type="module" src="/assets/app.js"></script>
 </body>
 </html>
