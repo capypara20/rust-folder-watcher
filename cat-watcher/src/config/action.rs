@@ -29,6 +29,7 @@
 //!
 //! 両方が同じ表を見るので、片方だけ直し忘れて食い違うことがない。
 
+use super::problem::{Location, Problem, RuleRef};
 use super::{ActionConfig, ActionType};
 use crate::error::AppError;
 
@@ -171,7 +172,7 @@ const EXECUTE: &[Requirement] = &[
     Requirement {
         key: "args",
         description: "プログラムに渡す引数",
-        hint: Some("引数がない場合は空の配列を指定してください"),
+        hint: Some("引数がない場合は空の配列 [] を指定してください"),
         present: |a| a.args.is_some(),
     },
     Requirement {
@@ -336,21 +337,22 @@ impl MissingField {
         }
     }
 
-    /// バリデーションエラーの文面にする。
+    /// 設定の問題として、場所を付けて表す。
     ///
     /// `type` は利用者が TOML に書いた綴り（`copy` など）で出す。
-    /// `Debug` の `Copy` だと設定ファイルを探すときに引っかからない。
-    pub fn message(&self, rule_name: &str, action_type: ActionType) -> String {
-        let head = format!(
-            "監視ルール名 {} のアクションの type が {} のとき、{}({}) を定義してください",
-            rule_name,
-            action_type.as_str(),
-            self.key,
-            self.description
+    /// `Debug` の `Copy` だと、設定ファイルを検索しても引っかからない。
+    pub fn problem(&self, rule: RuleRef, index: usize, action_type: ActionType) -> Problem {
+        let problem = Problem::new(
+            Location::Action { rule, index, key: self.key.to_string() },
+            format!(
+                "type = \"{}\" では必須です（{}）",
+                action_type.as_str(),
+                self.description
+            ),
         );
         match self.hint {
-            Some(hint) => format!("{head}。{hint}"),
-            None => head,
+            Some(hint) => problem.with_hint(hint),
+            None => problem,
         }
     }
 }
@@ -369,14 +371,16 @@ pub struct RejectedField {
 }
 
 impl RejectedField {
-    /// バリデーションエラーの文面にする。
-    pub fn message(&self, rule_name: &str, action_type: ActionType) -> String {
-        format!(
-            "監視ルール名 {} のアクションの {} は type が command / execute のときだけ指定できます（{} では外部プロセスを起動しません）",
-            rule_name,
-            self.key,
-            action_type.as_str()
+    /// 設定の問題として、場所を付けて表す。
+    pub fn problem(&self, rule: RuleRef, index: usize, action_type: ActionType) -> Problem {
+        Problem::new(
+            Location::Action { rule, index, key: self.key.to_string() },
+            format!("type = \"{}\" では使えません", action_type.as_str()),
         )
+        .with_hint(format!(
+            "{} は外部プロセスを起動する command / execute でだけ使えます。この行を削除してください",
+            self.key
+        ))
     }
 }
 

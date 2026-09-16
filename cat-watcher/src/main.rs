@@ -42,8 +42,8 @@ const AFTER_LONG_HELP: &str = "\
 
 \x1b[33;1m▶ プレースホルダー\x1b[0m  \x1b[2m（rules.toml の destination / command / args などで使用可）\x1b[0m
   \x1b[32m{FullName}\x1b[0m         ファイルのフルパス
-  \x1b[32m{Name}\x1b[0m             ファイル名（拡張子なし）
-  \x1b[32m{BaseName}\x1b[0m         ファイル名（拡張子あり）
+  \x1b[32m{Name}\x1b[0m             ファイル名（拡張子あり）
+  \x1b[32m{BaseName}\x1b[0m         ファイル名（拡張子なし）
   \x1b[32m{Extension}\x1b[0m        拡張子
   \x1b[32m{DirectoryName}\x1b[0m    親ディレクトリのフルパス
   \x1b[32m{WatchPath}\x1b[0m        監視ルートパス

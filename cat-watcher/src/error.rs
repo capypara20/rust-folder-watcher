@@ -24,6 +24,7 @@
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::config::Problem;
 use crate::path_fmt;
 
 /// 終了コード。CLI とサービス（`sc query` の `SERVICE_EXIT_CODE`）で同じ値を使う。
@@ -106,11 +107,11 @@ impl AppError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidFile {
     pub path: PathBuf,
-    pub problems: Vec<String>,
+    pub problems: Vec<Problem>,
 }
 
 impl InvalidFile {
-    pub fn new(path: &Path, problems: Vec<String>) -> Self {
+    pub fn new(path: &Path, problems: Vec<Problem>) -> Self {
         Self {
             path: path.to_path_buf(),
             problems,
@@ -127,7 +128,10 @@ impl fmt::Display for InvalidFile {
             path_fmt::for_log(&self.path)
         )?;
         for (i, problem) in self.problems.iter().enumerate() {
-            write!(f, "\n  [{}] {}", i + 1, problem)?;
+            let number = format!("[{}] ", i + 1);
+            // 内容と対処の行を、場所の見出しの頭に揃える
+            let indent = format!("  {}", " ".repeat(number.len()));
+            write!(f, "\n  {number}{}", problem.render(&indent))?;
         }
         Ok(())
     }

@@ -1,22 +1,28 @@
 //! 設定（global.toml / rules.toml）の意味的バリデーション。
+//!
+//! 見つけた問題は [`Problem`]（場所・内容・対処）として積む。
+//! 文の組み立てと字下げは `Problem` の表示側が 1 か所で行うので、
+//! ここでは「どこの」「何が」「どうすればよいか」だけを書く。
+//! 文言の約束は `config/problem.rs` の先頭を参照。
 
 use std::path::Path;
 
 use globset::Glob;
 use regex::Regex;
-use crate::exe_path;
 
 use super::action::{missing_fields, rejected_fields};
 use super::model::{ActionConfig, GlobalConfig, RulesConfig};
+use super::problem::{Location, Problem, RuleRef};
 use super::types::ActionType;
 use crate::actions::command::VALID_SHELLS;
-use crate::placeholder::validate_placeholders;
+use crate::exe_path;
+use crate::placeholder::{find_any_placeholder, find_unknown_placeholder, VALID_PLACEHOLDERS};
 
 /// 検証の結果。問題が 1 件も無ければ `Ok`。
 ///
 /// どのファイルの問題かはここでは分からない（設定の値だけを見ている）ので、
 /// ファイルパスを付けて `AppError` にするのは読み込み側（`config::load`）の役目。
-pub type Problems = Vec<String>;
+pub type Problems = Vec<Problem>;
 
 pub(crate) fn finish_validation(errors: Problems) -> Result<(), Problems> {
 	if errors.is_empty() {
@@ -26,210 +32,332 @@ pub(crate) fn finish_validation(errors: Problems) -> Result<(), Problems> {
 	}
 }
 
-/// ログの出力先ディレクトリとファイル名を検証する共通ヘルパ。
-/// `label` はエラーメッセージ内のフィールド名（例: "system_log.dir"）。
-fn validate_log_target(
-	dir: &str,
-	file_name: &str,
-	dir_label: &str,
-	file_label: &str,
-	errors: &mut Vec<String>,
-) {
-	if dir.trim().is_empty() {
-		errors.push(format!("{dir_label} が空文字列です。ログ出力先ディレクトリを定義してください"));
-	} else {
-		let dir_path = Path::new(dir);
-		if !dir_path.exists() {
-			errors.push(format!("{dir_label} が存在しません: {}", dir_path.display()));
-		} else if !dir_path.is_dir() {
-			errors.push(format!("{dir_label} にディレクトリ以外のパスが指定されています: {}", dir_path.display()));
-		}
-	}
-
-	if file_name.trim().is_empty() {
-		errors.push(format!("{file_label} が空文字列です。ファイル名を定義してください"));
-	} else {
-		let valid_placeholders = ["Date", "DateTime"];
-		let re = regex::Regex::new(r"\{([A-Za-z]+)\}").unwrap();
-		for caps in re.captures_iter(file_name) {
-			let name = &caps[1];
-			if !valid_placeholders.contains(&name) {
-				errors.push(format!(
-					"{file_label} に使用できないプレースホルダーがあります: {{{name}}}。使用可能なのは {{Date}} と {{DateTime}} のみです"
-				));
-			}
-		}
-	}
-}
+/* ---- global.toml ------------------------------------------ */
 
 pub fn validate_global_config(config: &GlobalConfig) -> Result<(), Problems> {
 	let mut errors = Vec::new();
-	validate_log_target(
+	collect_log_target_errors(
 		&config.system_log.dir,
 		&config.system_log.file_name,
-		"system_log.dir",
-		"system_log.file_name",
+		|key| Location::Global(format!("system_log.{key}")),
 		&mut errors,
 	);
 	if let Some(dashboard) = &config.dashboard {
 		if dashboard.enabled && dashboard.bind.parse::<std::net::SocketAddr>().is_err() {
-			errors.push(format!(
-				"dashboard.bind がソケットアドレスとして不正です（例: 127.0.0.1:8080）: {}",
-				dashboard.bind
-			));
+			errors.push(
+				Problem::new(
+					Location::Global("dashboard.bind".into()),
+					format!("'{}' はアドレスとポートとして解釈できません", dashboard.bind),
+				)
+				.with_hint("「IP アドレス:ポート番号」の形で指定してください（例: 127.0.0.1:8080）"),
+			);
 		}
 	}
 	// 0 を渡すと tokio のタイマーが作れずパニックするため、ここで止める。
 	if config.poll_interval_ms() == 0 {
-		errors.push("detect.poll_interval_ms は 1 以上にしてください（0 では検知の確認処理が回りません）".to_string());
+		errors.push(
+			Problem::new(Location::Global("detect.poll_interval_ms".into()), "0 は指定できません")
+				.with_hint("1 以上の値を指定してください"),
+		);
 	}
 	finish_validation(errors)
 }
 
-/// glob パターン列の構文を検査する。
+/// ログの出力先フォルダとファイル名を検証する。system_log と、ルールごとのログで共用する。
 ///
-/// patterns / exclude_patterns / dir_patterns / exclude_dir_patterns の 4 種で共用する。
-/// `field` はエラーメッセージに出す設定キー名。
-fn collect_glob_errors(patterns: &[String], rule_id: &str, field: &str, errors: &mut Vec<String>) {
-	for pt in patterns {
-		if let Err(e) = Glob::new(pt) {
-			errors.push(format!("監視ルール名 {} の {} に無効な glob があります '{}': {}", rule_id, field, pt, e));
-		}
-	}
-}
-
-/// 正規表現の構文を検査する。
-///
-/// regex / exclude_regex / dir_regex / exclude_dir_regex の 4 種で共用する。
-fn collect_regex_errors(pattern: Option<&str>, rule_id: &str, field: &str, errors: &mut Vec<String>) {
-	if let Some(re_str) = pattern {
-		if let Err(e) = Regex::new(re_str) {
-			errors.push(format!("監視ルール名 {} の {} に無効な正規表現があります '{}': {}", rule_id, field, re_str, e));
-		}
-	}
-}
-
-/// glob 列と正規表現が両方指定されていないかを検査する。
-///
-/// watch.patterns と watch.regex だけは「どちらか一方が必須」で意味が違うため、
-/// ここではなく呼び出し側で個別に判定している。
-fn collect_exclusive_error(
-	patterns: &[String],
-	regex: Option<&str>,
-	rule_id: &str,
-	glob_field: &str,
-	regex_field: &str,
-	errors: &mut Vec<String>,
+/// `at` は `"dir"` / `"file_name"` を受け取り、そのキーの場所を返す。
+fn collect_log_target_errors(
+	dir: &str,
+	file_name: &str,
+	at: impl Fn(&str) -> Location,
+	errors: &mut Problems,
 ) {
-	if !patterns.is_empty() && regex.is_some() {
-		errors.push(format!("監視ルール名 {} の {} と {} は片方のみ定義できます", rule_id, glob_field, regex_field));
+	if dir.trim().is_empty() {
+		errors.push(
+			Problem::new(at("dir"), "空になっています")
+				.with_hint("ログを書き出すフォルダを指定してください"),
+		);
+	} else {
+		let dir_path = Path::new(dir);
+		if !dir_path.exists() {
+			errors.push(
+				Problem::new(at("dir"), format!("フォルダ '{dir}' が存在しません"))
+					.with_hint("先にフォルダを作成するか、存在するフォルダを指定してください"),
+			);
+		} else if !dir_path.is_dir() {
+			errors.push(Problem::new(at("dir"), format!("'{dir}' はフォルダではありません")));
+		}
+	}
+
+	if file_name.trim().is_empty() {
+		errors.push(
+			Problem::new(at("file_name"), "空になっています")
+				.with_hint("ログのファイル名を指定してください"),
+		);
+		return;
+	}
+	let valid = ["Date", "DateTime"];
+	let re = Regex::new(r"\{([A-Za-z]+)\}").unwrap();
+	for caps in re.captures_iter(file_name) {
+		let name = &caps[1];
+		if !valid.contains(&name) {
+			errors.push(
+				Problem::new(at("file_name"), format!("{{{name}}} はログのファイル名には使えません"))
+					.with_hint("使えるのは {Date} と {DateTime} です"),
+			);
+		}
 	}
 }
+
+/* ---- rules.toml ------------------------------------------- */
 
 pub fn validate_rules_config(config: &RulesConfig) -> Result<(), Problems> {
 	let mut errors = Vec::new();
 	let rules = &config.rules;
 
 	if rules.is_empty() {
-		errors.push("ルールが1つも定義されていません。少なくとも1つのルールを定義してください".to_string());
+		errors.push(
+			Problem::new(Location::File, "ルールが 1 つもありません")
+				.with_hint("[[rules]] を 1 つ以上定義してください"),
+		);
 		return finish_validation(errors);
 	}
 
-	for (index, rule) in rules.iter().enumerate() {
-		let rule_id = if rule.name.trim().is_empty() {
-			format!("{}番目のルール(name未設定)", index + 1)
-		} else {
-			rule.name.clone()
-		};
+	for (i, rule) in rules.iter().enumerate() {
+		let rule_ref = RuleRef::new(&rule.name, i + 1);
+		let at = |key: &str| Location::Rule { rule: rule_ref.clone(), key: key.to_string() };
 
 		if rule.name.trim().is_empty() {
-			errors.push(format!("{} 番目の name が空文字列です。ルールにわかりやすい名前を定義してください", index + 1));
+			errors.push(
+				Problem::new(at("name"), "空になっています")
+					.with_hint("ルールを見分けられる名前を付けてください"),
+			);
 		}
 		if rule.actions.is_empty() {
-			errors.push(format!("監視ルール名 {} の actions(処理) が1つも定義されていません。少なくとも1つのアクションを定義してください", rule_id));
+			errors.push(
+				Problem::new(at("actions"), "アクションが 1 つもありません")
+					.with_hint("[[rules.actions]] を 1 つ以上定義してください"),
+			);
 		}
+		if !Path::new(&rule.watch.path).is_dir() {
+			errors.push(
+				Problem::new(at("watch.path"), format!("フォルダ '{}' が存在しません", rule.watch.path))
+					.with_hint("監視するフォルダのパスが正しいか確認してください"),
+			);
+		}
+
 		if rule.watch.events.is_empty() {
-			errors.push(format!("監視ルール名 {} の watch.events(検知イベント) が1つも定義されていません。少なくとも1つのイベントを定義してください", rule_id));
+			errors.push(
+				Problem::new(at("watch.events"), "空になっています")
+					.with_hint("検知するイベント（create / modify / delete / rename）を 1 つ以上指定してください"),
+			);
 		}
-		if (rule.watch.patterns.is_some() && rule.watch.regex.is_some()) || (rule.watch.patterns.is_none() && rule.watch.regex.is_none()) {
-			errors.push(format!("監視ルール名 {} の watch.patterns と watch.regex は片方のみ定義できます。どちらか一方を定義してください", rule_id));
-		}
-
-		for action in &rule.actions {
-			collect_action_errors(action, &rule_id, &mut errors);
-			collect_action_placeholder_errors(action, &rule_id, &mut errors);
-		}
-
-		let watch_path = Path::new(&rule.watch.path);
-		if !watch_path.is_dir() {
-			errors.push(format!("監視ルール名 {} の watch.path が存在しません: {}", rule_id, watch_path.display()));
+		match (rule.watch.patterns.is_some(), rule.watch.regex.is_some()) {
+			(true, true) => errors.push(
+				Problem::new(at("watch.patterns"), "watch.patterns と watch.regex が両方指定されています")
+					.with_hint("どちらか一方だけにしてください"),
+			),
+			(false, false) => errors.push(
+				Problem::new(at("watch.patterns"), "watch.patterns と watch.regex のどちらも指定されていません")
+					.with_hint("どちらか一方を指定してください（すべて対象にするなら patterns = [\"*\"]）"),
+			),
+			_ => {}
 		}
 
 		// glob / 正規表現の構文チェックと、glob 列と正規表現の排他チェック。
 		// errors に積む順番がそのままエラー表示の順番になるので、並びは変えないこと。
-		collect_glob_errors(rule.watch.patterns.as_deref().unwrap_or(&[]), &rule_id, "patterns", &mut errors);
-		collect_regex_errors(rule.watch.regex.as_deref(), &rule_id, "regex", &mut errors);
+		collect_glob_errors(rule.watch.patterns.as_deref().unwrap_or(&[]), &at("watch.patterns"), &mut errors);
+		collect_regex_errors(rule.watch.regex.as_deref(), &at("watch.regex"), &mut errors);
 
-		collect_glob_errors(&rule.watch.exclude_patterns, &rule_id, "exclude_patterns", &mut errors);
-		collect_exclusive_error(
-			&rule.watch.exclude_patterns,
-			rule.watch.exclude_regex.as_deref(),
-			&rule_id,
-			"exclude_patterns",
-			"exclude_regex",
-			&mut errors,
-		);
-		collect_regex_errors(rule.watch.exclude_regex.as_deref(), &rule_id, "exclude_regex", &mut errors);
-
-		collect_exclusive_error(
-			&rule.watch.exclude_dir_patterns,
-			rule.watch.exclude_dir_regex.as_deref(),
-			&rule_id,
-			"exclude_dir_patterns",
-			"exclude_dir_regex",
-			&mut errors,
-		);
-		collect_glob_errors(&rule.watch.exclude_dir_patterns, &rule_id, "exclude_dir_patterns", &mut errors);
-		collect_regex_errors(rule.watch.exclude_dir_regex.as_deref(), &rule_id, "exclude_dir_regex", &mut errors);
-
-		collect_exclusive_error(
-			&rule.watch.dir_patterns,
-			rule.watch.dir_regex.as_deref(),
-			&rule_id,
-			"dir_patterns",
-			"dir_regex",
-			&mut errors,
-		);
-		collect_glob_errors(&rule.watch.dir_patterns, &rule_id, "dir_patterns", &mut errors);
-		collect_regex_errors(rule.watch.dir_regex.as_deref(), &rule_id, "dir_regex", &mut errors);
+		for (glob_key, regex_key, globs, regex) in [
+			(
+				"watch.exclude_patterns",
+				"watch.exclude_regex",
+				&rule.watch.exclude_patterns,
+				rule.watch.exclude_regex.as_deref(),
+			),
+			(
+				"watch.exclude_dir_patterns",
+				"watch.exclude_dir_regex",
+				&rule.watch.exclude_dir_patterns,
+				rule.watch.exclude_dir_regex.as_deref(),
+			),
+			(
+				"watch.dir_patterns",
+				"watch.dir_regex",
+				&rule.watch.dir_patterns,
+				rule.watch.dir_regex.as_deref(),
+			),
+		] {
+			if !globs.is_empty() && regex.is_some() {
+				errors.push(
+					Problem::new(at(glob_key), format!("{glob_key} と {regex_key} が両方指定されています"))
+						.with_hint("どちらか一方だけにしてください"),
+				);
+			}
+			collect_glob_errors(globs, &at(glob_key), &mut errors);
+			collect_regex_errors(regex, &at(regex_key), &mut errors);
+		}
 
 		if let Some(rule_log) = &rule.log {
-			if let Some(detect) = &rule_log.detect {
-				if detect.enabled {
-					validate_log_target(
-						&detect.dir,
-						&detect.file_name,
-						&format!("監視ルール名 {} の log.detect.dir", rule_id),
-						&format!("監視ルール名 {} の log.detect.file_name", rule_id),
-						&mut errors,
-					);
+			for (section, target) in [("detect", &rule_log.detect), ("action", &rule_log.action)] {
+				let Some(target) = target else { continue };
+				if !target.enabled {
+					continue;
 				}
+				collect_log_target_errors(
+					&target.dir,
+					&target.file_name,
+					|key| at(&format!("log.{section}.{key}")),
+					&mut errors,
+				);
 			}
-			if let Some(action) = &rule_log.action {
-				if action.enabled {
-					validate_log_target(
-						&action.dir,
-						&action.file_name,
-						&format!("監視ルール名 {} の log.action.dir", rule_id),
-						&format!("監視ルール名 {} の log.action.file_name", rule_id),
-						&mut errors,
-					);
-				}
-			}
+		}
+
+		// アクションはルールの項目の後に並べる（設定ファイルに書く順と同じ）。
+		for (j, action) in rule.actions.iter().enumerate() {
+			collect_action_errors(action, &rule_ref, j + 1, &mut errors);
+			collect_action_placeholder_errors(action, &rule_ref, j + 1, &mut errors);
 		}
 	}
 
 	finish_validation(errors)
+}
+
+/// glob パターン列の構文を検査する。
+fn collect_glob_errors(patterns: &[String], at: &Location, errors: &mut Problems) {
+	for pattern in patterns {
+		if let Err(e) = Glob::new(pattern) {
+			errors.push(Problem::new(at.clone(), format!("'{pattern}' は glob パターンとして正しくありません: {e}")));
+		}
+	}
+}
+
+/// 正規表現の構文を検査する。
+fn collect_regex_errors(pattern: Option<&str>, at: &Location, errors: &mut Problems) {
+	if let Some(pattern) = pattern {
+		if let Err(e) = Regex::new(pattern) {
+			errors.push(Problem::new(at.clone(), format!("'{pattern}' は正規表現として正しくありません: {e}")));
+		}
+	}
+}
+
+/* ---- アクション ------------------------------------------- */
+
+/// 1 つのアクションを検証する。`index` は 1 始まりの番号。
+pub(crate) fn collect_action_errors(action: &ActionConfig, rule: &RuleRef, index: usize, errors: &mut Problems) {
+	let at = |key: &str| Location::Action { rule: rule.clone(), index, key: key.to_string() };
+
+	// 必須項目と「その type では効かない項目」の判定は config/action.rs の表が持つ。
+	// ここに条件を書き写すと、型を足したときに片方だけ直し忘れる。
+	for missing in missing_fields(action) {
+		errors.push(missing.problem(rule.clone(), index, action.type_));
+	}
+	for rejected in rejected_fields(action) {
+		errors.push(rejected.problem(rule.clone(), index, action.type_));
+	}
+
+	// ここから下は「書かれている値が使えるか」の検査。
+	// 表では表せないので、型ごとに個別に見る。
+	match action.type_ {
+		ActionType::Copy | ActionType::Move => {
+			if let Some(dest) = &action.destination {
+				// auto_create は設定読み込み時に global の既定値が焼き込まれている。
+				// 未解決（None）のまま来た場合は自動作成側を既定とする。
+				if let Some(problem) = check_destination(dest, action.auto_create.unwrap_or(true), at("destination")) {
+					errors.push(problem);
+				}
+			}
+		}
+
+		ActionType::Command => {
+			// 起動時に弾かないと、実行時に検知のたび失敗し続けることになる。
+			if let Some(shell) = &action.shell {
+				if !VALID_SHELLS.contains(&shell.to_lowercase().as_str()) {
+					errors.push(
+						Problem::new(at("shell"), format!("'{shell}' はこの OS では使えません"))
+							.with_hint(format!("{} のいずれかを指定してください", VALID_SHELLS.join(" / "))),
+					);
+				} else if let Some(program) = crate::actions::command::shell_program(shell) {
+					// 名前が有効でも、その実行ファイルが見つからなければ起動できない。
+					let subject = format!("シェル '{shell}' の実行ファイル '{program}'");
+					if let Some(problem) = check_executable(program, &subject, at("shell")) {
+						errors.push(problem);
+					}
+				}
+			}
+			collect_working_dir_errors(action, at("working_dir"), errors);
+		}
+
+		ActionType::Execute => {
+			collect_working_dir_errors(action, at("working_dir"), errors);
+			// プレースホルダーを書いた場合は「置き換えられない」の方で知らせる（二重に出さない）。
+			if let Some(program) = action.program.as_ref().filter(|p| find_any_placeholder(p).is_none()) {
+				// 名前だけの指定（"pwsh" など）も、実行時に初めて失敗しないよう PATH 解決まで確かめる。
+				if let Some(problem) = check_executable(program, &format!("'{program}'"), at("program")) {
+					errors.push(problem);
+				}
+			}
+		}
+	}
+}
+
+/// working_dir は command / execute で共通。空文字は「変更しない」の意味。
+fn collect_working_dir_errors(action: &ActionConfig, at: Location, errors: &mut Problems) {
+	let Some(dir) = &action.working_dir else { return };
+	// プレースホルダーを書いた場合は「置き換えられない」の方で知らせる。
+	// ここでも「存在しません」を出すと、同じ原因で 2 件になって紛らわしい。
+	if find_any_placeholder(dir).is_some() {
+		return;
+	}
+	if !dir.is_empty() && !Path::new(dir).is_dir() {
+		errors.push(
+			Problem::new(at, format!("フォルダ '{dir}' が存在しません"))
+				.with_hint("存在するフォルダを指定するか、変更しない場合は空文字 \"\" にしてください"),
+		);
+	}
+}
+
+/// プレースホルダーの書き方を検査する。
+///
+/// 実行時にプレースホルダーを展開するのは `destination` / `command` / `args` だけ。
+/// `program` と `working_dir` は書いた文字列のまま使うので、`{FullName}` などを
+/// 書いても置き換わらない。以前はここも「使える名前か」だけを見ていたため、
+/// 置き換わらないのに検査を通ってしまっていた。
+pub(crate) fn collect_action_placeholder_errors(action: &ActionConfig, rule: &RuleRef, index: usize, errors: &mut Problems) {
+	let at = |key: &str| Location::Action { rule: rule.clone(), index, key: key.to_string() };
+
+	// 展開する項目: 使える名前だけか
+	let hint = format!(
+		"使えるのは {} です",
+		VALID_PLACEHOLDERS.iter().map(|n| format!("{{{n}}}")).collect::<Vec<_>>().join(" ")
+	);
+	let mut expanded: Vec<(String, &str)> = [("destination", &action.destination), ("command", &action.command)]
+		.into_iter()
+		.filter_map(|(key, value)| value.as_deref().map(|v| (key.to_string(), v)))
+		.collect();
+	if let Some(args) = &action.args {
+		// args は 1 始まりで数える（actions の番号と揃える）
+		expanded.extend(args.iter().enumerate().map(|(i, arg)| (format!("args[{}]", i + 1), arg.as_str())));
+	}
+	for (key, value) in expanded {
+		if let Some(name) = find_unknown_placeholder(value) {
+			errors.push(
+				Problem::new(at(&key), format!("{{{name}}} は使えないプレースホルダーです")).with_hint(hint.clone()),
+			);
+		}
+	}
+
+	// 展開しない項目: そもそも書けない
+	for (key, value) in [("program", &action.program), ("working_dir", &action.working_dir)] {
+		let Some(value) = value else { continue };
+		if let Some(name) = find_any_placeholder(value) {
+			errors.push(
+				Problem::new(at(key), format!("{{{name}}} は {key} では置き換えられません"))
+					.with_hint("プレースホルダーが使えるのは destination / command / args です。この項目には値をそのまま書いてください"),
+			);
+		}
+	}
 }
 
 /// destination 文字列から、最初のプレースホルダー（`{`）より前の静的部分を取り出し、
@@ -260,160 +388,90 @@ pub(crate) fn static_root_of_destination(dest: &str) -> &str {
 ///
 /// 実行時は宛先フォルダを自動作成する（`auto_create = true`）ため、
 /// 「フォルダがまだ無い」だけでは起動を止めない。ただしドライブや共有そのものが
-/// 無い（例: 未接続の `Z:\backup`）と実行時に毎回失敗し続けるので、
+/// 無いと実行時に毎回失敗し続けるので、
 /// **先祖をたどっても実在するフォルダが 1 つも無い**場合はエラーにする。
 ///
-/// `auto_create = false` のときは従来どおり、静的部分が実在するディレクトリで
+/// `auto_create = false` のときは、静的部分が実在するディレクトリで
 /// あることを要求する（typo による予期しない書き込みをロード時に検出したい用途）。
-pub(crate) fn collect_destination_errors(
-	dest: &str,
-	auto_create: bool,
-	rule_name: &str,
-	errors: &mut Vec<String>,
-) {
+fn check_destination(dest: &str, auto_create: bool, at: Location) -> Option<Problem> {
 	let static_root = static_root_of_destination(dest);
 	// "{WatchPath}/out" のように先頭からプレースホルダーで始まる場合は、
 	// 展開してみないと分からないのでロード時には判定しない。
 	if static_root.is_empty() {
-		return;
+		return None;
 	}
 
 	let path = Path::new(static_root);
 	if !auto_create {
-		if !path.is_dir() {
-			errors.push(format!(
-				"監視ルール名 {} のアクションの destination(コピー先/移動先) のルート '{}' が存在しません（auto_create = true にすると実行時に自動作成できます）",
-				rule_name, static_root
-			));
-		}
-		return;
+		return (!path.is_dir()).then(|| {
+			Problem::new(at, format!("フォルダ '{static_root}' が存在しません")).with_hint(
+				"先にフォルダを作成してください。実行時に自動で作らせるなら auto_create = true にしてください",
+			)
+		});
 	}
 
 	// 相対パスはプロセスの作業ディレクトリ基準になり、ここでは判定できない。
-	if !path.is_absolute() {
-		return;
+	if !path.is_absolute() || has_existing_ancestor(path) {
+		return None;
 	}
-	if !has_existing_ancestor(path) {
-		errors.push(format!(
-			"監視ルール名 {} のアクションの destination(コピー先/移動先) '{}' は、親をたどっても実在するフォルダが見つかりません（ドライブレターやネットワーク共有名を確認してください）",
-			rule_name, static_root
-		));
-	}
+	Some(
+		Problem::new(at, format!("'{static_root}' は、親をたどっても存在するフォルダがありません"))
+			.with_hint(DESTINATION_ROOT_HINT),
+	)
 }
+
+/// 親をたどっても何も無い、というのは先頭部分の書き間違いがほとんど。
+/// Windows にはドライブと共有名があるので、それを具体的に挙げる。
+#[cfg(windows)]
+const DESTINATION_ROOT_HINT: &str = "ドライブ名やネットワーク共有名が正しいか確認してください";
+#[cfg(not(windows))]
+const DESTINATION_ROOT_HINT: &str = "パスの先頭部分が正しいか確認してください";
 
 /// そのパス自身か、先祖のいずれかが実在するディレクトリなら true。
 fn has_existing_ancestor(path: &Path) -> bool {
-	path.ancestors()
-		.any(|p| !p.as_os_str().is_empty() && p.is_dir())
+	path.ancestors().any(|p| !p.as_os_str().is_empty() && p.is_dir())
 }
 
 /// 実行ファイルが実際に起動できる場所にあるかを検査する。
 ///
-/// 起動時に弾かないと、検知が起きるたびに同じ失敗を繰り返すことになる。
-///
-/// **サービスとして動かす場合、exe の探索に使われるのはサービスの PATH
-/// （システム PATH）であって、ログオンユーザーの PATH ではない。**
-/// そのため「CLI では動くのにサービスでは動かない」という事故が起きる。
-/// ここで検査しておけば、その食い違いを起動時点で検出できる。
-fn collect_executable_errors(program: &str, rule_name: &str, label: &str, errors: &mut Vec<String>) {
+/// `subject` は内容の文頭に置く「何が」（例: `'tool'`、`シェル 'pwsh' の実行ファイル 'pwsh.exe'`）。
+fn check_executable(program: &str, subject: &str, at: Location) -> Option<Problem> {
 	match exe_path::resolve(program) {
-		exe_path::Resolved::Found(_) => {}
-		exe_path::Resolved::MissingAtPath => errors.push(format!(
-			"監視ルール名 {} のアクションの {} が存在しません: {}",
-			rule_name, label, program
-		)),
-		exe_path::Resolved::NotOnPath => errors.push(format!(
-			"監視ルール名 {} のアクションの {} '{}' が PATH 上で見つかりません\n    対処: フルパスで指定するか、システム PATH に追加してください\n          サービスは SYSTEM のシステム PATH を使うため、ユーザー領域に入れたもの（scoop 等）は見つかりません\n    検索した PATH: {}",
-			rule_name,
-			label,
-			program,
-			exe_path::search_path_summary()
-		)),
+		exe_path::Resolved::Found(_) => None,
+		exe_path::Resolved::MissingAtPath => Some(
+			Problem::new(at, format!("{subject} が存在しません")).with_hint("パスが正しいか確認してください"),
+		),
+		// ファイルは在るので「存在しない」とは言わない。対処がまったく違う。
+		exe_path::Resolved::NotExecutable(found) => {
+			// 名前だけの指定（PATH で見つけた）ときは、どのファイルかを添える。
+			// パスで指定したときは subject と同じになるので書かない。
+			let message = if found == Path::new(program) {
+				format!("{subject} に実行権限がありません")
+			} else {
+				format!("{subject} に実行権限がありません: {}", crate::path_fmt::for_log(&found))
+			};
+			Some(
+				Problem::new(at, message)
+					.with_hint("ファイルに実行権限を付けてください（例: chmod +x <ファイル>）"),
+			)
+		}
+		exe_path::Resolved::NotOnPath => Some(
+			Problem::new(
+				at,
+				format!("{subject} が PATH 上に見つかりません\n{}", exe_path::search_path_summary()),
+			)
+			.with_hint(NOT_ON_PATH_HINT),
+		),
 	}
 }
 
-pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
-	// 必須項目と「その type では効かない項目」の判定は config/action.rs の表が持つ。
-	// ここに条件を書き写すと、型を足したときに片方だけ直し忘れる。
-	for missing in missing_fields(action) {
-		errors.push(missing.message(rule_name, action.type_));
-	}
-	for rejected in rejected_fields(action) {
-		errors.push(rejected.message(rule_name, action.type_));
-	}
-
-	// ここから下は「書かれている値が使えるか」の検査。
-	// 表では表せないので、型ごとに個別に見る。
-	match action.type_ {
-		ActionType::Copy | ActionType::Move => {
-			if let Some(dest) = &action.destination {
-				// auto_create は設定読み込み時に global の既定値が焼き込まれている。
-				// 未解決（None）のまま来た場合は自動作成側を既定とする。
-				collect_destination_errors(
-					dest,
-					action.auto_create.unwrap_or(true),
-					rule_name,
-					errors,
-				);
-			}
-		}
-
-		ActionType::Command => {
-			// 起動時に弾かないと、実行時に検知のたび失敗し続けることになる。
-			if let Some(shell) = &action.shell {
-				if !VALID_SHELLS.contains(&shell.to_lowercase().as_str()) {
-					errors.push(format!(
-						"監視ルール名 {} のアクションの shell '{}' はこの OS では使用できません。{} のいずれかを指定してください",
-						rule_name,
-						shell,
-						VALID_SHELLS.join(" / ")
-					));
-				} else if let Some(program) = crate::actions::command::shell_program(shell) {
-					// 名前が有効でも、その実行ファイルが見つからなければ起動できない。
-					collect_executable_errors(program, rule_name, &format!("shell '{shell}' の実行ファイル"), errors);
-				}
-			}
-			collect_working_dir_errors(action, rule_name, errors);
-		}
-
-		ActionType::Execute => {
-			collect_working_dir_errors(action, rule_name, errors);
-			if let Some(program) = &action.program {
-				// 従来は絶対パスのときだけ存在を見ていた。名前だけの指定（"pwsh" など）は
-				// 素通りして実行時に初めて失敗していたので、PATH 解決まで確かめる。
-				collect_executable_errors(program, rule_name, "program", errors);
-			}
-		}
-	}
-}
-
-/// working_dir は command / execute で共通。空文字は「変更しない」の意味。
-fn collect_working_dir_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
-	let Some(dir) = &action.working_dir else { return };
-	if !dir.is_empty() && !Path::new(dir).is_dir() {
-		errors.push(format!("監視ルール名 {} のアクションの working_dir が存在しません: {}", rule_name, dir));
-	}
-}
-
-fn collect_action_placeholder_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
-	let fields = [
-		("action.destination", &action.destination),
-		("action.command", &action.command),
-		("action.working_dir", &action.working_dir),
-		("action.program", &action.program),
-	];
-	for (field_name, field_value) in fields {
-		if let Some(value) = field_value {
-			if let Err(e) = validate_placeholders(value, rule_name, field_name) {
-				errors.push(e);
-			}
-		}
-	}
-	if let Some(args) = &action.args {
-		for (index, arg) in args.iter().enumerate() {
-			if let Err(e) = validate_placeholders(arg, rule_name, &format!("action.args[{}]", index)) {
-				errors.push(e);
-			}
-		}
-	}
-}
+/// PATH 上に見つからないときの対処。
+///
+/// Windows のサービスは、実行ファイルをサービスの実行アカウントの PATH から探す。
+/// ログオンしているユーザーの PATH ではないので、「CLI では動くのにサービスでは
+/// 見つからない」が起きる。これは Windows のサービス一般の事実なので書き分ける。
+#[cfg(windows)]
+const NOT_ON_PATH_HINT: &str = "フルパスで指定するか、PATH に含まれるフォルダに置いてください\n\
+	サービスとして動かす場合は、サービスの実行アカウントの PATH から探されます";
+#[cfg(not(windows))]
+const NOT_ON_PATH_HINT: &str = "フルパスで指定するか、PATH に含まれるフォルダに置いてください";

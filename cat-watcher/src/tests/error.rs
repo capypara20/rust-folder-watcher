@@ -5,6 +5,12 @@
 //! - 表示がそれだけで意味の通る文になっていて、どのファイルの話か分かること
 
 use super::*;
+use crate::config::problem::Location;
+
+/// 場所を気にしないテスト用の問題。
+fn problem(message: &str) -> Problem {
+    Problem::new(Location::File, message)
+}
 
 fn io_error() -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::NotFound, "見つかりません")
@@ -26,7 +32,7 @@ fn setup_failures_use_config_exit_code() {
             path: PathBuf::from("rules.toml"),
             message: "x".into(),
         },
-        AppError::ConfigInvalid(vec![InvalidFile::new(Path::new("rules.toml"), vec!["x".into()])]),
+        AppError::ConfigInvalid(vec![InvalidFile::new(Path::new("rules.toml"), vec![problem("x")])]),
         AppError::TemplateWrite {
             path: PathBuf::from("global.toml"),
             source: io_error(),
@@ -90,16 +96,19 @@ fn config_parse_names_the_file() {
 #[test]
 fn config_invalid_lists_problems_per_file() {
     let e = AppError::ConfigInvalid(vec![
-        InvalidFile::new(Path::new("global.toml"), vec!["g1".into()]),
-        InvalidFile::new(Path::new("rules.toml"), vec!["r1".into(), "r2".into()]),
+        InvalidFile::new(Path::new("global.toml"), vec![problem("g1")]),
+        InvalidFile::new(Path::new("rules.toml"), vec![problem("r1"), problem("r2")]),
     ]);
     let text = e.to_string();
 
     assert!(text.contains("1 件の問題があります: global.toml"), "{text}");
     assert!(text.contains("2 件の問題があります: rules.toml"), "{text}");
-    assert!(text.contains("[1] g1"), "{text}");
-    assert!(text.contains("[1] r1"), "{text}");
-    assert!(text.contains("[2] r2"), "{text}");
+    // 番号の後ろに場所の見出し、次の行に内容が来る
+    assert!(text.contains("[1] （ファイル全体）"), "{text}");
+    assert!(text.contains("[2] （ファイル全体）"), "{text}");
+    for message in ["g1", "r1", "r2"] {
+        assert!(text.lines().any(|l| l.trim() == message), "{message} が 1 行になっていない: {text}");
+    }
     // global の一覧の後に rules の一覧が来る（混ざらない）
     assert!(text.find("g1").unwrap() < text.find("rules.toml").unwrap(), "{text}");
 }
@@ -110,7 +119,7 @@ fn config_invalid_lists_problems_per_file() {
 /// 同じ意味の前置きが 3 つ並んでいた。
 #[test]
 fn config_invalid_has_no_stacked_prefixes() {
-    let e = AppError::ConfigInvalid(vec![InvalidFile::new(Path::new("rules.toml"), vec!["x".into()])]);
+    let e = AppError::ConfigInvalid(vec![InvalidFile::new(Path::new("rules.toml"), vec![problem("x")])]);
     let text = e.to_string();
     assert!(!text.contains("エラー:"), "前置きが付いている: {text}");
 }
