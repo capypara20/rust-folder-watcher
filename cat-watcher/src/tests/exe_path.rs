@@ -112,10 +112,11 @@ fn search_path_summary_is_capped() {
     );
 }
 
-/// 実行ビットが無いファイルは解決しないこと（Unix 固有）。
+/// 実行ビットが無いファイルは解決せず、「存在しない」とも区別すること（Unix 固有）。
 ///
 /// ファイルが在るだけで OK にしてしまうと、実行できない設定ファイルや
 /// テキストを program に書いても起動時チェックを素通りしてしまう。
+/// 一方で「存在しません」と出すと、ファイルが在るのに探し回ることになる。
 #[cfg(not(windows))]
 #[test]
 fn file_without_execute_bit_is_not_resolved() {
@@ -131,12 +132,12 @@ fn file_without_execute_bit_is_not_resolved() {
         std::fs::set_permissions(&path, perm).unwrap();
     };
 
-    // 実行ビット無し → 解決しない
+    // 実行ビット無し → 解決しない。「存在しない」ではなく「実行できない」と返す
     set_mode(0o644);
     assert_eq!(
         resolve(path.to_str().unwrap()),
-        Resolved::MissingAtPath,
-        "実行ビットが無いのに解決してしまった"
+        Resolved::NotExecutable(path.clone()),
+        "実行ビットが無いファイルを正しく区別できていない"
     );
 
     // 実行ビットを付ければ解決する
@@ -160,4 +161,78 @@ fn directory_is_not_resolved_as_executable() {
         Resolved::MissingAtPath,
         "ディレクトリを実行ファイルとして解決してしまった"
     );
+}
+
+// =========================================================
+// PATH 探索（環境変数を書き換えずに、ディレクトリ列を直接渡して確かめる）
+// =========================================================
+
+/// テスト用に、実行権限の有無を指定してファイルを置く。
+/// Windows には実行ビットが無いので、拡張子だけ合わせて置く。
+fn place(dir: &Path, name: &str, executable: bool) -> PathBuf {
+    #[cfg(windows)]
+    let name = format!("{name}.exe");
+    let path = dir.join(name);
+    std::fs::write(&path, b"x").unwrap();
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perm = std::fs::metadata(&path).unwrap().permissions();
+        perm.set_mode(if executable { 0o755 } else { 0o644 });
+        std::fs::set_permissions(&path, perm).unwrap();
+    }
+    #[cfg(windows)]
+    let _ = executable;
+    path
+}
+
+/// どのディレクトリにも無ければ NotOnPath。
+#[test]
+fn search_dirs_reports_not_on_path_when_absent() {
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
+    assert_eq!(search_dirs(dirs, "tool"), Resolved::NotOnPath);
+}
+
+/// 実行できないものしか無ければ、それを NotExecutable として報告すること（Unix 固有）。
+/// 「PATH 上に見つかりません」と出すと、ファイルが在るのに PATH を疑うことになる。
+#[cfg(not(windows))]
+#[test]
+fn search_dirs_reports_non_executable_match() {
+    let a = tempfile::tempdir().unwrap();
+    let path = place(a.path(), "tool", false);
+    let dirs = vec![a.path().to_path_buf()];
+    assert_eq!(search_dirs(dirs, "tool"), Resolved::NotExecutable(path));
+}
+
+/// 手前に実行できない同名ファイルがあっても、後ろに実行できるものがあればそちらを使うこと。
+/// OS も実行できないファイルは飛ばして探し続けるので、それに合わせる（Unix 固有）。
+#[cfg(not(windows))]
+#[test]
+fn search_dirs_skips_non_executable_and_keeps_searching() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    place(first.path(), "tool", false);
+    let good = place(second.path(), "tool", true);
+
+    let dirs = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+    assert_eq!(search_dirs(dirs, "tool"), Resolved::Found(good));
+}
+
+/// 先に見つかった実行ファイルが使われること（PATH の順序を守る）。
+#[test]
+fn search_dirs_respects_order() {
+    let first = tempfile::tempdir().unwrap();
+    let second = tempfile::tempdir().unwrap();
+    let winner = place(first.path(), "tool", true);
+    place(second.path(), "tool", true);
+
+    let dirs = vec![first.path().to_path_buf(), second.path().to_path_buf()];
+    // Windows は PATHEXT 由来の大文字拡張子（tool.EXE）で見つかることがあるので、
+    // ファイル名ではなく「どのディレクトリで見つかったか」で比べる。
+    match search_dirs(dirs, "tool") {
+        Resolved::Found(found) => assert_eq!(found.parent(), winner.parent()),
+        other => panic!("見つかるはずが見つからない: {other:?}"),
+    }
 }

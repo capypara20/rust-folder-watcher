@@ -324,14 +324,33 @@ fn collect_executable_errors(program: &str, rule_name: &str, label: &str, errors
 			rule_name, label, program
 		)),
 		exe_path::Resolved::NotOnPath => errors.push(format!(
-			"監視ルール名 {} のアクションの {} '{}' が PATH 上で見つかりません\n    対処: フルパスで指定するか、システム PATH に追加してください\n          サービスは SYSTEM のシステム PATH を使うため、ユーザー領域に入れたもの（scoop 等）は見つかりません\n    検索した PATH: {}",
+			"監視ルール名 {} のアクションの {} '{}' が PATH 上で見つかりません\n    対処: {}\n    検索した PATH: {}",
 			rule_name,
 			label,
 			program,
+			NOT_ON_PATH_HINT,
 			exe_path::search_path_summary()
+		)),
+		// 「存在しない」とは対処が違う（ファイルはあるので置き直す必要はない）。
+		exe_path::Resolved::NotExecutable(found) => errors.push(format!(
+			"監視ルール名 {} のアクションの {} に実行権限がありません: {}\n    対処: chmod +x {} で実行権限を付けてください",
+			rule_name,
+			label,
+			found.display(),
+			found.display()
 		)),
 	}
 }
+
+/// PATH 上に見つからないときの対処。
+///
+/// Windows ではサービスが SYSTEM のシステム PATH で exe を探すため、
+/// ユーザー領域に入れたもの（scoop 等）が見つからないという落とし穴がある。
+/// Linux には SYSTEM も scoop も無いので、その説明は出さない。
+#[cfg(windows)]
+const NOT_ON_PATH_HINT: &str = "フルパスで指定するか、システム PATH に追加してください\n          サービスは SYSTEM のシステム PATH を使うため、ユーザー領域に入れたもの（scoop 等）は見つかりません";
+#[cfg(not(windows))]
+const NOT_ON_PATH_HINT: &str = "フルパスで指定するか、PATH に含まれるディレクトリに置いてください";
 
 pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
 	// 必須項目と「その type では効かない項目」の判定は config/action.rs の表が持つ。

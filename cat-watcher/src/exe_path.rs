@@ -21,6 +21,11 @@ pub enum Resolved {
     MissingAtPath,
     /// 名前だけの指定で、PATH 上に見つからなかった。
     NotOnPath,
+    /// ファイルは在るが実行権限が無い（Unix の実行ビット）。
+    ///
+    /// 「存在しない」と区別するのは、対処がまったく違うため。
+    /// こちらは `chmod +x` だけで直る。Windows には実行ビットが無いので出ない。
+    NotExecutable(PathBuf),
 }
 
 /// 実行ファイルを解決する。
@@ -36,16 +41,14 @@ pub fn resolve(program: &str) -> Resolved {
         program.contains(std::path::MAIN_SEPARATOR) || program.contains('/');
     if has_separator {
         let path = Path::new(program);
-        return match first_existing(path.parent().unwrap_or(Path::new("")), path) {
-            Some(found) => Resolved::Found(found),
-            None => Resolved::MissingAtPath,
+        return match lookup(path.parent().unwrap_or(Path::new("")), path) {
+            Lookup::Executable(found) => Resolved::Found(found),
+            Lookup::NotExecutable(found) => Resolved::NotExecutable(found),
+            Lookup::Missing => Resolved::MissingAtPath,
         };
     }
 
-    match search_on_path(program) {
-        Some(found) => Resolved::Found(found),
-        None => Resolved::NotOnPath,
-    }
+    search_on_path(program)
 }
 
 /// 実際に探索した PATH のディレクトリ一覧。
@@ -82,30 +85,71 @@ pub fn search_path_summary() -> String {
 }
 
 /// PATH の各ディレクトリから実行ファイルを探す。
-fn search_on_path(name: &str) -> Option<PathBuf> {
-    let paths = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&paths) {
+///
+/// OS と同じく、実行できないファイルは飛ばして先のディレクトリを探し続ける。
+/// 最後まで実行できるものが無かったときだけ、途中で見かけた
+/// 「実行権限の無い同名ファイル」を報告する（それが原因の可能性が高いため）。
+fn search_on_path(name: &str) -> Resolved {
+    match std::env::var_os("PATH") {
+        Some(paths) => search_dirs(std::env::split_paths(&paths), name),
+        None => Resolved::NotOnPath,
+    }
+}
+
+/// 与えられたディレクトリを順に探す。
+///
+/// 環境変数の PATH から切り離してあるのはテストのため。テストは並列に走るので、
+/// PATH を書き換えると無関係なテストまで巻き込む。
+fn search_dirs(dirs: impl IntoIterator<Item = PathBuf>, name: &str) -> Resolved {
+    let mut not_executable = None;
+    for dir in dirs {
         if dir.as_os_str().is_empty() {
             continue;
         }
-        if let Some(found) = first_existing(&dir, Path::new(name)) {
-            return Some(found);
+        match lookup(&dir, Path::new(name)) {
+            Lookup::Executable(found) => return Resolved::Found(found),
+            Lookup::NotExecutable(found) => {
+                not_executable.get_or_insert(found);
+            }
+            Lookup::Missing => {}
         }
     }
-    None
+    match not_executable {
+        Some(found) => Resolved::NotExecutable(found),
+        None => Resolved::NotOnPath,
+    }
 }
 
-/// `dir` の下で `name` の候補を順に試し、最初に見つかったものを返す。
-fn first_existing(dir: &Path, name: &Path) -> Option<PathBuf> {
-    let file_name = name.file_name()?;
-    let stem = file_name.to_str()?;
+/// 1 つのディレクトリを見た結果。
+enum Lookup {
+    Executable(PathBuf),
+    NotExecutable(PathBuf),
+    Missing,
+}
+
+/// `dir` の下で `name` の候補を順に試す。
+///
+/// 実行できるものが見つかればそれを返す。無ければ、実行権限の無い
+/// ファイルを見かけていればそれを、何も無ければ `Missing` を返す。
+fn lookup(dir: &Path, name: &Path) -> Lookup {
+    let Some(stem) = name.file_name().and_then(|f| f.to_str()) else {
+        return Lookup::Missing;
+    };
+    let mut not_executable = None;
     for candidate in candidate_names(stem) {
         let full = dir.join(&candidate);
-        if is_executable_file(&full) {
-            return Some(full);
+        if !full.is_file() {
+            continue;
         }
+        if has_execute_permission(&full) {
+            return Lookup::Executable(full);
+        }
+        not_executable.get_or_insert(full);
     }
-    None
+    match not_executable {
+        Some(found) => Lookup::NotExecutable(found),
+        None => Lookup::Missing,
+    }
 }
 
 /// 試すファイル名の候補。
@@ -142,20 +186,23 @@ fn path_extensions() -> Vec<String> {
         .collect()
 }
 
-/// 実行できるファイルか。Unix では実行ビットも見る。
-fn is_executable_file(path: &Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
+/// ファイルに実行権限があるか。呼び出し側でファイルであることは確認済み。
+///
+/// Unix は実行ビットを見る。Windows には実行ビットが無く、
+/// 起動できるかは拡張子（PATHEXT）で決まるので常に true。
+fn has_execute_permission(path: &Path) -> bool {
     #[cfg(not(windows))]
     {
         use std::os::unix::fs::PermissionsExt;
-        return std::fs::metadata(path)
+        std::fs::metadata(path)
             .map(|m| m.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false);
+            .unwrap_or(false)
     }
     #[cfg(windows)]
-    true
+    {
+        let _ = path;
+        true
+    }
 }
 
 #[cfg(test)]

@@ -782,6 +782,46 @@ fn execute_absolute_program_that_is_missing_is_rejected() {
 	assert!(err.to_string().contains("存在しません"), "{err}");
 }
 
+/// PATH 上に無いときの対処文は OS に合わせること。
+/// Linux に SYSTEM も scoop も無いので、Windows 向けの説明を出すと混乱させる。
+#[test]
+fn not_on_path_hint_matches_the_os() {
+	let action = execute_action("cat-watcher-definitely-not-a-real-command-xyz");
+	let msg = validate_action(&action, "r").unwrap_err().to_string();
+	#[cfg(windows)]
+	{
+		assert!(msg.contains("SYSTEM"), "Windows ではサービスの PATH の説明が要る: {msg}");
+		assert!(msg.contains("scoop"), "{msg}");
+	}
+	#[cfg(not(windows))]
+	{
+		assert!(!msg.contains("SYSTEM"), "Linux に SYSTEM の説明は要らない: {msg}");
+		assert!(!msg.contains("scoop"), "Linux に scoop の説明は要らない: {msg}");
+	}
+	assert!(msg.contains("対処:"), "対処が無い: {msg}");
+}
+
+/// ファイルは在るが実行権限が無いときは、「存在しません」ではなく
+/// 実行権限の問題として案内すること（Unix 固有）。
+#[cfg(not(windows))]
+#[test]
+fn execute_program_without_execute_bit_suggests_chmod() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let dir = tempdir().unwrap();
+	let path = dir.path().join("noexec.sh");
+	std::fs::write(&path, b"#!/bin/sh\n").unwrap();
+	let mut perm = std::fs::metadata(&path).unwrap().permissions();
+	perm.set_mode(0o644);
+	std::fs::set_permissions(&path, perm).unwrap();
+
+	let action = execute_action(path.to_str().unwrap());
+	let msg = validate_action(&action, "r").unwrap_err().to_string();
+	assert!(msg.contains("実行権限がありません"), "{msg}");
+	assert!(msg.contains("chmod +x"), "{msg}");
+	assert!(!msg.contains("存在しません"), "ファイルは在るのに存在しないと言っている: {msg}");
+}
+
 /// この OS で使えるシェルは、実体が見つかるので通ること。
 /// ここが落ちると、正しい設定まで起動できなくなる。
 #[test]
