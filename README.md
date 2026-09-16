@@ -871,10 +871,21 @@ systemctl status cat-watcher
 | TOML の文法として正しいか（クオートの閉じ忘れ、`\` のエスケープなど） | 両ファイル |
 | 値の型が合っているか（数値の所に文字列を書いていないか、など） | 両ファイル |
 | `type` / `events` / `rotation` / `level` などが決まった値のどれかか（大文字小文字は区別しない） | 両ファイル |
-| **知らないキーが無いか**（キー名の書き間違い） | `global.toml` 全体と、`rules.toml` の `[rules.log.detect]` / `[rules.log.action]` |
+| **知らないキーが無いか**（キー名の書き間違い） | 両ファイルのすべてのセクション |
 
-> `rules.toml` の `[[rules]]` / `[rules.watch]` / `[[rules.actions]]` では、知らないキーは**無視されます**（エラーになりません）。
-> 必須のキーを書き間違えた場合は「必須です」のエラーで気づけますが、省略できるキー（`auto_create` など）を書き間違えると、既定値のまま動きます。
+省略できるキーを書き間違えても、既定値のまま黙って動くことはありません。
+
+```
+設定ファイルの書き方に誤りがあります: C:\catwatcher\rules.toml
+TOML parse error at line 18, column 1
+   |
+18 | auto_craete = false
+   | ^^^^^^^^^^^
+unknown field `auto_craete`, expected one of `type`, `destination`, `overwrite`, ...
+```
+
+> v2.3.0 までは、`rules.toml` の `[[rules]]` / `[rules.watch]` / `[[rules.actions]]` にある知らないキーは無視されていました。
+> 古い設定に使われなくなったキーが残っていると、v2.3.1 からは起動時にエラーになります。エラーに出たキーの行を削除してください。
 
 #### 2. global.toml の中身
 

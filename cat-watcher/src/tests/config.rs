@@ -1029,3 +1029,91 @@ fn placeholder_in_unexpanded_field_is_reported_once() {
 		assert_eq!(count, 1, "{key} の問題が {count} 件: {problems:?}");
 	}
 }
+
+// =========================================================
+// #99: rules.toml の知らないキー（書き間違い）は起動時に弾く
+// =========================================================
+
+/// rules.toml に 1 行足して読み込み、ConfigParse になることと、
+/// エラーの中にその書き間違いのキー名が出ていることを確かめる。
+fn assert_unknown_key_is_rejected(label: &str, rules_text: &str, typo: &str) {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let rules = dir.path().join("rules.toml");
+	std::fs::write(&rules, rules_text).unwrap();
+
+	match load(&global, &rules) {
+		Err(AppError::ConfigParse { path, message }) => {
+			assert_eq!(path, rules, "{label}");
+			assert!(message.contains(typo), "{label}: 書き間違いのキー名が出ていない: {message}");
+		}
+		other => panic!("{label}: ConfigParse を期待したが {other:?}"),
+	}
+}
+
+/// 以前は、省略できるキーを書き間違えると黙って無視され、既定値のまま動いていた。
+/// ルール・監視・アクションのどの段でも弾くこと。
+#[test]
+fn unknown_keys_in_rules_are_rejected() {
+	let dir = tempdir().unwrap();
+	let watch = sanitize_path(dir.path());
+
+	// アクション: auto_create の書き間違い（無視されると宛先を勝手に作ってしまう）
+	let action = format!(
+		r#"{}
+	auto_craete = false
+"#,
+		cmd_action()
+	);
+	assert_unknown_key_is_rejected("action", &make_rules_toml(&watch, &action), "auto_craete");
+
+	// 監視: 省略できる dir_patterns の書き間違い
+	let rules = make_rules_toml(&watch, &cmd_action()).replacen(
+		"recursive = true",
+		r#"recursive = true
+		dir_pattern = ["drop"]"#,
+		1,
+	);
+	assert_unknown_key_is_rejected("watch", &rules, "dir_pattern");
+
+	// ルール: [[rules]] 直下
+	let rules = make_rules_toml(&watch, &cmd_action()).replacen(
+		"enabled = true",
+		r#"enabled = true
+		descripton = "x""#,
+		1,
+	);
+	assert_unknown_key_is_rejected("rule", &rules, "descripton");
+
+	// ファイル全体: [[rules]] と同じ階層
+	let rules = format!(
+		r#"rule = []
+{}"#,
+		make_rules_toml(&watch, &cmd_action())
+	);
+	assert_unknown_key_is_rejected("file", &rules, "rule");
+}
+
+/// 正しいキーだけなら、省略できるキーを書いても読めること（弾きすぎていないこと）。
+#[test]
+fn known_optional_keys_in_rules_are_accepted() {
+	let dir = tempdir().unwrap();
+	let global = write_valid_global(dir.path());
+	let rules = dir.path().join("rules.toml");
+	let action = format!(
+		r#"{}
+	wait = true
+	timeout_ms = 1000
+	delay_ms = 10
+"#,
+		cmd_action()
+	);
+	let text = make_rules_toml(&sanitize_path(dir.path()), &action).replacen(
+		"recursive = true",
+		r#"recursive = true
+		dir_patterns = ["drop"]"#,
+		1,
+	);
+	std::fs::write(&rules, text).unwrap();
+	assert!(load(&global, &rules).is_ok(), "{:?}", load(&global, &rules).err());
+}
