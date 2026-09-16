@@ -217,6 +217,9 @@ fn default_dashboard_history() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+// キー名の書き間違いを起動時に弾く（#99）。省略できるキー（auto_create など）を
+// 書き間違えると、以前は黙って無視され既定値のまま動いていた。
+#[serde(deny_unknown_fields)]
 pub struct RulesConfig {
     pub rules: Vec<Rule>,
 }
@@ -264,6 +267,9 @@ pub struct RuleLogTarget {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+// キー名の書き間違いを起動時に弾く（#99）。省略できるキー（auto_create など）を
+// 書き間違えると、以前は黙って無視され既定値のまま動いていた。
+#[serde(deny_unknown_fields)]
 pub struct Rule {
     pub enabled: bool,
     pub name: String,
@@ -273,6 +279,9 @@ pub struct Rule {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+// キー名の書き間違いを起動時に弾く（#99）。省略できるキー（auto_create など）を
+// 書き間違えると、以前は黙って無視され既定値のまま動いていた。
+#[serde(deny_unknown_fields)]
 pub struct Watch {
     pub path: String,
     pub recursive: bool,
@@ -295,6 +304,9 @@ pub struct Watch {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+// キー名の書き間違いを起動時に弾く（#99）。省略できるキー（auto_create など）を
+// 書き間違えると、以前は黙って無視され既定値のまま動いていた。
+#[serde(deny_unknown_fields)]
 pub struct ActionConfig {
     #[serde(rename = "type")]
     pub type_: ActionType,
