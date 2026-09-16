@@ -15,6 +15,19 @@ macro_rules! impl_case_insensitive_deserialize {
         impl_case_insensitive_deserialize!(@build $type, "", $($variant => $s),+);
     };
     (@build $type:ident, $note:expr, $($variant:ident => $s:literal),+) => {
+        impl $type {
+            /// 設定ファイルに書く綴りを返す。
+            ///
+            /// エラー文で使うと、利用者が実際に TOML へ書いた表記と
+            /// そのまま一致する（`Debug` の `Copy` ではなく `copy` になる）。
+            #[allow(dead_code)] // 型によっては文面に出さないので使われない
+            pub fn as_str(&self) -> &'static str {
+                match self {
+                    $($type::$variant => $s,)+
+                }
+            }
+        }
+
         impl<'de> Deserialize<'de> for $type {
             fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
                 let s = String::deserialize(d)?;
@@ -88,7 +101,7 @@ impl_case_insensitive_deserialize!(Event,
     Rename => "rename",
 );
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActionType {
     Copy,
     Move,
