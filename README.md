@@ -530,8 +530,8 @@ Windows / Linux 共通の挙動です。
 [2026-05-07 10:30:20] [MATCH]   ルール=csv-backup | パス=C:\data\report.csv | Create,Modify
 [2026-05-07 10:30:20] [ACTION]  (1/2) copy  destination=D:\backup\{Date}  overwrite=false
 [2026-05-07 10:30:20] [OK]      コピー完了: C:\data\report.csv → D:\backup\20260507\report.csv  [BLAKE3: ...]
-[2026-05-07 10:30:20] [ACTION]  (2/2) log
-[2026-05-07 10:30:20] [OK]      検知: report.csv
+[2026-05-07 10:30:20] [ACTION]  (2/2) cmd  shell=pwsh  command=& C:/tool/notify.ps1 {Name}
+[2026-05-07 10:30:20] [OK]      起動
 ```
 
 **① システムログ**（`system_{Date}.log`）
@@ -566,9 +566,25 @@ Windows / Linux 共通の挙動です。
 件数が合わないときは、途中で打ち切られたということです。
 
 ```
-2026-05-07 10:30:20 │ 1. ERR    │ command: 異常終了しました (exit=1) (shell=cmd cmd=exit 1)
+2026-05-07 10:30:20 │ 1. cmd    │ shell=cmd  command=exit 1
+2026-05-07 10:30:20 │ 1. ERR    │ 異常終了しました (exit=1)
 2026-05-07 10:30:20 │ 1. WARN   │ 以降の 2 件を実行せず中断しました: 2.command, 3.execute
 ```
+
+`ERR` の行には**失敗の内容だけ**が出ます。何を実行したか（シェルとコマンド、コピー元とコピー先など）は、
+すぐ上のアクション開始行を見てください。
+
+主な失敗の表示:
+
+| 状況 | 表示 |
+|---|---|
+| `wait = true` で終了コードが 0 以外 | `異常終了しました (exit=1)` |
+| `timeout_ms` を超えた | `時間内に終わらないため強制終了しました` |
+| プログラムを起動できない | `プログラムを起動できません: <OS のエラー>` |
+| コピーが最後まで失敗した | `コピーに失敗しました（4 回試行）: <コピー元> → <コピー先>: <OS のエラー>` |
+| `auto_create = false` で宛先フォルダが無い | `コピー先フォルダ '<パス>' が存在しません（auto_create = false のため作成しません）` |
+| `verify_integrity = true` で内容が一致しない | `コピー後の内容が元のファイルと一致しません（BLAKE3 で比較）` |
+| 宛先に同名ファイルがあり `overwrite = false`（失敗ではなく `WARN`） | `コピー先に同名のファイルがあるためスキップしました（overwrite = false）: <パス>` |
 `[system_log]` の `console = false` でターミナル出力を、各ログの `enabled = false`
 で個別にファイル出力を無効にできます。
 

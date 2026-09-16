@@ -53,7 +53,6 @@ fn runtime_failures_use_runtime_exit_code() {
         AppError::Runtime("x".into()),
         AppError::Watch("x".into()),
         AppError::Action("x".into()),
-        AppError::FileHash("x".into()),
     ];
     for e in &runtime {
         assert_eq!(e.exit_code(), exit_code::RUNTIME, "{e:?}");
@@ -122,4 +121,13 @@ fn config_invalid_has_no_stacked_prefixes() {
     let e = AppError::ConfigInvalid(vec![InvalidFile::new(Path::new("rules.toml"), vec![problem("x")])]);
     let text = e.to_string();
     assert!(!text.contains("エラー:"), "前置きが付いている: {text}");
+}
+
+/// アクションの失敗は、内容だけを表示すること。
+///
+/// アクションのログでは開始行に種類と対象が、行頭に ERR が出ているので、
+/// 以前のように「アクション実行エラー: command: …」と重ねると読みにくい。
+#[test]
+fn action_error_shows_only_the_reason() {
+    assert_eq!(AppError::Action("異常終了しました (exit=3)".into()).to_string(), "異常終了しました (exit=3)");
 }

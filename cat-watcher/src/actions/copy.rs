@@ -1,13 +1,14 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::config::{ActionConfig, RetryConfig};
+use crate::config::{RetryConfig, Transfer};
 use crate::error::AppError;
+use crate::path_fmt::for_log;
 use crate::placeholder::PlaceholderContext;
 
 use super::common::{
-    ensure_dest_dir, ensure_parent_dir, expand_action_destination, relative_to,
-    resolve_dest_path, resolve_folder_dest, try_copy_once, walk_entries, TransferOptions,
+    ensure_dest_dir, ensure_parent_dir, expand_destination, relative_to, resolve_dest_path,
+    resolve_folder_dest, try_copy_once, walk_entries,
 };
 use super::ActionSink;
 
@@ -17,18 +18,17 @@ const LABEL: &str = "コピー先";
 /// copy アクションのエントリポイント。
 /// 戻り値:
 ///   - Ok(Some(dest_file_path)) ... 1 ファイル/フォルダ完了。{Destination} 更新用
-///   - Ok(None)                 ... スキップ (overwrite=false で既存)
+///   - Ok(None)                 ... スキップ（overwrite = false で宛先に同名のファイルがある）
 ///   - Err(_)                   ... 全リトライ失敗
 pub async fn execute(
-    action: &ActionConfig,
+    opts: &Transfer,
     src: &Path,
     ctx: &PlaceholderContext,
     retry: &RetryConfig,
     sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
-    let dest_root = expand_action_destination(action, ctx)?;
-    let opts = TransferOptions::from_action(action);
+    let dest_root = expand_destination(opts, ctx);
     let watch_path = Path::new(&ctx.watch_path);
 
     if src.is_dir() {
@@ -43,15 +43,15 @@ pub async fn execute(
 async fn copy_one_file(
     src: &Path,
     dest: &Path,
-    opts: TransferOptions,
+    opts: &Transfer,
     retry: &RetryConfig,
     sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<Option<PathBuf>, AppError> {
     if dest.exists() && !opts.overwrite {
         sink.warn(step.0, step.1, format!(
-            "copy スキップ (overwrite=false で既存): {}",
-            crate::path_fmt::for_log(dest)
+            "コピー先に同名のファイルがあるためスキップしました（overwrite = false）: {}",
+            for_log(dest)
         ));
         return Ok(None);
     }
@@ -69,7 +69,7 @@ async fn copy_one_file(
                     .unwrap_or_default();
                 sink.ok(step.0, step.1, format!(
                     "コピー完了: {} → {}{}",
-                    crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), hash_suffix
+                    for_log(src), for_log(dest), hash_suffix
                 ));
                 return Ok(Some(dest.to_path_buf()));
             }
@@ -77,14 +77,14 @@ async fn copy_one_file(
                 let _ = tokio::fs::remove_file(dest).await;
                 if attempt < max_attempts {
                     sink.warn(step.0, step.1, format!(
-                        "copy 失敗 ({}回目/{}回): {} → {}: {} (再試行)",
-                        attempt, max_attempts, crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), e
+                        "コピーに失敗しました（{attempt}/{max_attempts} 回目、再試行します）: {} → {}: {e}",
+                        for_log(src), for_log(dest)
                     ));
                     tokio::time::sleep(interval).await;
                 } else {
                     return Err(AppError::Action(format!(
-                        "copy 最終失敗 ({}回試行): {} → {}: {}",
-                        max_attempts, crate::path_fmt::for_log(src), crate::path_fmt::for_log(dest), e
+                        "コピーに失敗しました（{max_attempts} 回試行）: {} → {}: {e}",
+                        for_log(src), for_log(dest)
                     )));
                 }
             }
@@ -99,7 +99,7 @@ async fn copy_directory_recursive(
     src_dir: &Path,
     dest_root: &Path,
     watch_path: &Path,
-    opts: TransferOptions,
+    opts: &Transfer,
     retry: &RetryConfig,
     sink: &ActionSink,
     step: (usize, usize),
@@ -128,7 +128,7 @@ async fn copy_directory_recursive(
     // 行が 1 本も出ず、何も起きなかったように見えてしまうため。
     sink.ok(step.0, step.1, format!(
         "フォルダのコピー完了: {} → {}（ファイル {}/{} 件・サブフォルダ {} 件）",
-        crate::path_fmt::for_log(src_dir), crate::path_fmt::for_log(&folder_dest), copied, files.len(), dirs.len()
+        for_log(src_dir), for_log(&folder_dest), copied, files.len(), dirs.len()
     ));
 
     Ok(Some(folder_dest))

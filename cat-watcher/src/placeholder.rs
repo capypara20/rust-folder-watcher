@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::LazyLock;
 
-use crate::error::AppError;
 use chrono::Local;
 use regex::Regex;
 
@@ -56,7 +55,11 @@ impl PlaceholderContext {
 static PLACEHOLDER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\{\{|\}\}|\{([A-Za-z]+)\}").unwrap());
 
-pub fn expand_placeholders(template: &str, ctx: &PlaceholderContext) -> Result<String, AppError> {
+/// テンプレートのプレースホルダーを置き換える。
+///
+/// 知らない名前はそのまま残す（起動時の検査で弾いているので、実行時には来ない）。
+/// 失敗する経路が無いので `Result` にはしない。
+pub fn expand_placeholders(template: &str, ctx: &PlaceholderContext) -> String {
     let result = PLACEHOLDER_REGEX.replace_all(template, |caps: &regex::Captures| {
         if let Some(name) = caps.get(1) {
             match name.as_str() {
@@ -81,7 +84,7 @@ pub fn expand_placeholders(template: &str, ctx: &PlaceholderContext) -> Result<S
             }
         }
     });
-    Ok(result.to_string())
+    result.to_string()
 }
 
 /// 使えるプレースホルダーの名前。エラー時の案内にもそのまま出す。

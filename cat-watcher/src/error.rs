@@ -9,7 +9,7 @@
 //!
 //! ```text
 //! 起動前（使い方・設定）  Usage / ConfigRead / ConfigParse / ConfigInvalid / TemplateWrite
-//! 実行中                  Runtime / Watch / Action / FileHash
+//! 実行中                  Runtime / Watch / Action
 //! ```
 //!
 //! 元になった原因（`std::io::Error` など）は捨てずに持つ。
@@ -75,12 +75,15 @@ pub enum AppError {
     Watch(String),
 
     /// アクションの実行に失敗した。
-    #[error("アクション実行エラー: {0}")]
+    ///
+    /// 表示は失敗の内容だけにする。アクションのログでは、直前の開始行に
+    /// 種類（copy など）と対象が、行頭に `ERR` が出ているので、ここで
+    /// 「アクション実行エラー: command: …」と重ねない。
+    ///
+    /// コピー後の内容検証（BLAKE3）の失敗もここに含める。以前は `FileHash` という
+    /// 別の種類だったが、起きる段階も扱いもアクションの失敗と同じだった。
+    #[error("{0}")]
     Action(String),
-
-    /// コピー後の内容検証に失敗した。
-    #[error("ファイルハッシュ値比較エラー: {0}")]
-    FileHash(String),
 }
 
 impl AppError {
@@ -95,10 +98,7 @@ impl AppError {
             | AppError::ConfigParse { .. }
             | AppError::ConfigInvalid(_)
             | AppError::TemplateWrite { .. } => exit_code::CONFIG,
-            AppError::Runtime(_)
-            | AppError::Watch(_)
-            | AppError::Action(_)
-            | AppError::FileHash(_) => exit_code::RUNTIME,
+            AppError::Runtime(_) | AppError::Watch(_) | AppError::Action(_) => exit_code::RUNTIME,
         }
     }
 }

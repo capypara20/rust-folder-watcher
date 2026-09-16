@@ -1,14 +1,15 @@
 use super::*;
-use crate::test_support::{base_action, make_sink};
-use crate::config::ActionType;
+use crate::config::ProcessWait;
+use crate::test_support::make_sink;
 use tempfile::tempdir;
 
-fn make_action(shell: &str, command: &str, working_dir: &str) -> ActionConfig {
-    let mut a = base_action(ActionType::Command);
-    a.shell = Some(shell.to_string());
-    a.command = Some(command.to_string());
-    a.working_dir = Some(working_dir.to_string());
-    a
+fn make_action(shell: &str, command: &str, working_dir: &str) -> Command {
+    Command {
+        shell: shell.to_string(),
+        command: command.to_string(),
+        working_dir: working_dir.to_string(),
+        wait: ProcessWait { enabled: false, timeout_ms: None },
+    }
 }
 
 fn make_ctx(src: &std::path::Path, watch: &std::path::Path) -> PlaceholderContext {
@@ -42,7 +43,7 @@ async fn unknown_shell_returns_error() {
     let action = make_action("zsh", "echo hi", "");
     let result = execute(&action, &ctx, &make_sink(), (1, 1)).await;
     assert!(result.is_err());
-    assert!(result.unwrap_err().to_string().contains("不明なシェル"));
+    assert!(result.unwrap_err().to_string().contains("この OS では使えません"));
 }
 
 #[cfg(not(windows))]
@@ -138,9 +139,8 @@ fn bash_args_stay_quoted() {
 use crate::actions::spawn::{outcome_message, wait_mode_from, SpawnOutcome, WaitMode};
 
 /// wait = true を立てたアクションを作る。
-fn with_wait(mut a: ActionConfig, timeout_ms: Option<u64>) -> ActionConfig {
-    a.wait = Some(true);
-    a.timeout_ms = timeout_ms;
+fn with_wait(mut a: Command, timeout_ms: Option<u64>) -> Command {
+    a.wait = ProcessWait { enabled: true, timeout_ms };
     a
 }
 
@@ -149,22 +149,21 @@ fn with_wait(mut a: ActionConfig, timeout_ms: Option<u64>) -> ActionConfig {
 fn wait_mode_from_resolves_defaults() {
     use std::time::Duration;
 
-    // 未指定と false はどちらも「待たない」
-    assert_eq!(wait_mode_from(None, None), WaitMode::Detach);
-    assert_eq!(wait_mode_from(Some(false), Some(1000)), WaitMode::Detach);
+    let wait = |enabled, timeout_ms| ProcessWait { enabled, timeout_ms };
 
-    // timeout_ms の未指定と 0 はどちらも無制限
+    // 待たない設定なら、timeout_ms があっても待たない
+    assert_eq!(wait_mode_from(wait(false, None)), WaitMode::Detach);
+    assert_eq!(wait_mode_from(wait(false, Some(1000))), WaitMode::Detach);
+
+    // timeout_ms が無ければ無制限（0 は ProcessWait を作る時点で None に揃えてある。
+    // その変換は tests/config_action.rs の timeout_zero_and_absent_both_mean_unlimited が守る）
     assert_eq!(
-        wait_mode_from(Some(true), None),
+        wait_mode_from(wait(true, None)),
         WaitMode::Wait { timeout: None }
     );
-    assert_eq!(
-        wait_mode_from(Some(true), Some(0)),
-        WaitMode::Wait { timeout: None }
-    );
 
     assert_eq!(
-        wait_mode_from(Some(true), Some(1500)),
+        wait_mode_from(wait(true, Some(1500))),
         WaitMode::Wait {
             timeout: Some(Duration::from_millis(1500))
         }
@@ -208,6 +207,9 @@ async fn wait_true_reports_nonzero_exit_as_error() {
         .await
         .expect_err("終了コード 1 は失敗になること");
     assert!(err.to_string().contains("exit=1"), "{err}");
+    // shell やコマンドは直前のアクション開始行に出ているので、エラーには重ねない
+    // （以前は「アクション実行エラー: command: 異常終了しました (exit=1) (shell=… cmd=…)」だった）
+    assert_eq!(err.to_string(), "異常終了しました (exit=1)");
 
     let action = with_wait(make_action(shell, ok_cmd, ""), None);
     assert!(execute(&action, &ctx, &make_sink(), (1, 1)).await.is_ok());

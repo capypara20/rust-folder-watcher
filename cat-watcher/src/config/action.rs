@@ -359,7 +359,8 @@ impl MissingField {
 
 impl From<MissingField> for AppError {
     fn from(e: MissingField) -> Self {
-        AppError::Action(format!("{}({}) が未指定", e.key, e.description))
+        // 起動時の検査をすり抜けた場合だけ実行時に来る。
+        AppError::Action(format!("設定の {}（{}）が指定されていません", e.key, e.description))
     }
 }
 

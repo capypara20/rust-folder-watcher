@@ -95,6 +95,12 @@ fn messages_do_not_assume_a_specific_environment() {
         ("config/loader.rs", include_str!("../config/loader.rs")),
         ("error.rs", include_str!("../error.rs")),
         ("exe_path.rs", include_str!("../exe_path.rs")),
+        ("actions/mod.rs", include_str!("../actions/mod.rs")),
+        ("actions/common.rs", include_str!("../actions/common.rs")),
+        ("actions/copy.rs", include_str!("../actions/copy.rs")),
+        ("actions/move.rs", include_str!("../actions/move.rs")),
+        ("actions/command.rs", include_str!("../actions/command.rs")),
+        ("actions/execute.rs", include_str!("../actions/execute.rs")),
     ];
     let banned = ["scoop", "chocolatey", "winget", "homebrew", "roze", "capypara"];
     for (file, body) in sources {

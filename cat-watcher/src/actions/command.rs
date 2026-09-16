@@ -1,42 +1,27 @@
-use crate::config::ActionConfig;
+use crate::config::Command;
 use crate::error::AppError;
 use crate::placeholder::{expand_placeholders, PlaceholderContext};
 
 use super::spawn::{outcome_message, spawn_process, wait_mode_from, SpawnArg};
 use super::ActionSink;
 
+/// command アクションを実行する。
+///
+/// エラーの文面には shell やコマンドを入れない。直前のアクション開始行に
+/// `shell=… command=…` が出ているので、重ねると読みにくくなるため。
 pub async fn execute(
-    action: &ActionConfig,
+    command: &Command,
     ctx: &PlaceholderContext,
     sink: &ActionSink,
     step: (usize, usize),
 ) -> Result<(), AppError> {
-    let raw_command = action
-        .command
-        .as_deref()
-        .ok_or_else(|| AppError::Action("command: command が未指定".to_string()))?;
-    let expanded = expand_placeholders(raw_command, ctx)?;
+    let expanded = expand_placeholders(&command.command, ctx);
+    let working_dir = Some(command.working_dir.as_str()).filter(|s| !s.is_empty());
 
-    let shell = action
-        .shell
-        .as_deref()
-        .ok_or_else(|| AppError::Action("command: shell が未指定".to_string()))?;
-
-    let working_dir = action
-        .working_dir
-        .as_deref()
-        .filter(|s| !s.is_empty());
-
-    let (program, args) = build_shell_command(shell, &expanded)?;
-    let wait = wait_mode_from(action.wait, action.timeout_ms);
-
-    let outcome = spawn_process(&program, &args, working_dir, wait)
+    let (program, args) = build_shell_command(&command.shell, &expanded)?;
+    let outcome = spawn_process(&program, &args, working_dir, wait_mode_from(command.wait))
         .await
-        .map_err(|e| {
-            AppError::Action(format!(
-                "command: プロセス起動失敗 (shell={shell} cmd={expanded}): {e}"
-            ))
-        })?;
+        .map_err(|e| AppError::Action(format!("シェル '{program}' を起動できません: {e}")))?;
 
     match outcome_message(outcome) {
         Ok(msg) => {
@@ -45,9 +30,7 @@ pub async fn execute(
         }
         // wait = true のときだけ起こる。アクション失敗として扱うので、
         // 以降のアクションチェーンは中断される。
-        Err(reason) => Err(AppError::Action(format!(
-            "command: {reason} (shell={shell} cmd={expanded})"
-        ))),
+        Err(reason) => Err(AppError::Action(reason)),
     }
 }
 
@@ -85,9 +68,10 @@ pub fn shell_program(shell: &str) -> Option<&'static str> {
 /// シェル種別から、起動するプログラムとその引数を組み立てる。
 /// 他の設定値と同じく、大文字小文字は区別しない（`cmd` / `CMD` どちらも可）。
 fn build_shell_command(shell: &str, expanded: &str) -> Result<(String, Vec<SpawnArg>), AppError> {
+    // 起動時の検査で弾いているので、実行時にここへ来るのは検査をすり抜けた場合だけ。
     let program = shell_program(shell).ok_or_else(|| {
         AppError::Action(format!(
-            "command: 不明なシェル '{shell}'。{} のいずれかを指定してください",
+            "シェル '{shell}' はこの OS では使えません（{} のいずれか）",
             VALID_SHELLS.join(" / ")
         ))
     })?;

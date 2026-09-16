@@ -1,6 +1,5 @@
 use super::*;
-use crate::test_support::{base_action, make_retry, make_sink, write_file};
-use crate::config::ActionType;
+use crate::test_support::{make_retry, make_sink, write_file};
 use tempfile::tempdir;
 
 fn make_copy_action(
@@ -8,13 +7,14 @@ fn make_copy_action(
     overwrite: bool,
     preserve_structure: bool,
     verify_integrity: bool,
-) -> ActionConfig {
-    let mut a = base_action(ActionType::Copy);
-    a.destination = Some(dest.to_string());
-    a.overwrite = Some(overwrite);
-    a.preserve_structure = Some(preserve_structure);
-    a.verify_integrity = Some(verify_integrity);
-    a
+) -> Transfer {
+    Transfer {
+        destination: dest.to_string(),
+        overwrite,
+        preserve_structure,
+        verify_integrity,
+        auto_create: true,
+    }
 }
 
 #[tokio::test]
@@ -61,7 +61,7 @@ async fn auto_create_false_errors_when_destination_missing() {
 
     let missing = dest_root.path().join("not_created_yet");
     let mut action = make_copy_action(missing.to_str().unwrap(), false, false, false);
-    action.auto_create = Some(false);
+    action.auto_create = false;
     let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
     let result = execute(&action, &src, &ctx, &make_retry(0), &make_sink(), (1, 1)).await;
@@ -79,7 +79,7 @@ async fn auto_create_true_makes_missing_destination() {
 
     let missing = dest_root.path().join("deep/er/est");
     let mut action = make_copy_action(missing.to_str().unwrap(), false, false, false);
-    action.auto_create = Some(true);
+    action.auto_create = true;
     let ctx = PlaceholderContext::new(&src, watch.path(), "");
 
     execute(&action, &src, &ctx, &make_retry(0), &make_sink(), (1, 1)).await.unwrap();
@@ -195,4 +195,26 @@ async fn destination_placeholder_expands_in_dest() {
     let expected = dest.path().join("a").join("a.txt");
     assert_eq!(result.as_deref(), Some(expected.as_path()));
     assert!(expected.exists());
+}
+
+/// auto_create = false で宛先が無いとき、どのフォルダが無いのかと理由が分かること。
+#[tokio::test]
+async fn missing_destination_error_names_the_folder_and_reason() {
+    let watch = tempdir().unwrap();
+    let dest_root = tempdir().unwrap();
+    let src = watch.path().join("a.txt");
+    write_file(&src, b"hello");
+
+    let missing = dest_root.path().join("not_created_yet");
+    let mut action = make_copy_action(missing.to_str().unwrap(), false, false, false);
+    action.auto_create = false;
+    let ctx = PlaceholderContext::new(&src, watch.path(), "");
+
+    let err = execute(&action, &src, &ctx, &make_retry(0), &make_sink(), (1, 1))
+        .await
+        .expect_err("宛先が無いのでエラー");
+    let text = err.to_string();
+    assert!(text.contains("not_created_yet"), "{text}");
+    assert!(text.contains("auto_create = false"), "{text}");
+    assert!(!text.contains("エラー:"), "前置きが付いている: {text}");
 }

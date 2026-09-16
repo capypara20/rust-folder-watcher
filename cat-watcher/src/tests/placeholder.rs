@@ -35,7 +35,7 @@ fn test_expand_each_placeholder() {
         ("{DateTime}", "20260412_153000"),
     ];
     for (template, expected) in cases {
-        assert_eq!(expand_placeholders(template, &ctx).unwrap(), expected, "template: {template}");
+        assert_eq!(expand_placeholders(template, &ctx), expected, "template: {template}");
     }
 }
 
@@ -44,15 +44,15 @@ fn test_expand_composite_and_escape() {
     let ctx = make_ctx();
     // 複合テンプレート
     assert_eq!(
-        expand_placeholders("{DirectoryName}/{BaseName}_{DateTime}.{Extension}", &ctx).unwrap(),
+        expand_placeholders("{DirectoryName}/{BaseName}_{DateTime}.{Extension}", &ctx),
         "C:/data/incoming/report_20260412_153000.csv"
     );
     // {{ }} エスケープ
-    assert_eq!(expand_placeholders("{{literal}}", &ctx).unwrap(), "{literal}");
-    assert_eq!(expand_placeholders("{{prefix}}_{Name}", &ctx).unwrap(), "{prefix}_report.csv");
+    assert_eq!(expand_placeholders("{{literal}}", &ctx), "{literal}");
+    assert_eq!(expand_placeholders("{{prefix}}_{Name}", &ctx), "{prefix}_report.csv");
     // プレースホルダなし
     assert_eq!(
-        expand_placeholders("plain text without placeholders", &ctx).unwrap(),
+        expand_placeholders("plain text without placeholders", &ctx),
         "plain text without placeholders"
     );
 }
@@ -61,7 +61,7 @@ fn test_expand_composite_and_escape() {
 fn test_expand_extension_empty_for_no_extension_file() {
     let mut ctx = make_ctx();
     ctx.extension = "".to_string();
-    assert_eq!(expand_placeholders("{BaseName}.{Extension}", &ctx).unwrap(), "report.");
+    assert_eq!(expand_placeholders("{BaseName}.{Extension}", &ctx), "report.");
 }
 
 #[test]

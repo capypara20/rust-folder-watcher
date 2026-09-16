@@ -14,7 +14,7 @@ pub(crate) mod problem;
 mod types;
 mod validate;
 
-pub use action::Action;
+pub use action::{Action, Command, Execute, ProcessWait, Transfer};
 pub use loader::{find_config_file, load, resolve_config_path};
 pub use model::*;
 pub use problem::Problem;
