@@ -2,14 +2,17 @@
 //!
 //! - [`types`]    列挙型（LogLevel / Event / ActionType など）と Deserialize。
 //! - [`model`]    設定ファイルをマッピングするデータ構造。
+//! - [`action`]   種類ごとに必須項目を分けた、検証済みのアクション。
 //! - [`loader`]   ファイル読み込みと `~` 展開。
 //! - [`validate`] 読み込んだ設定の意味的バリデーション。
 
+mod action;
 mod loader;
 mod model;
 mod types;
 mod validate;
 
+pub use action::Action;
 pub use loader::{
 	apply_global_defaults, find_config_file, load_global_config, load_rules_config,
 	resolve_config_path,

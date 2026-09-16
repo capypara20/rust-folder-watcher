@@ -6,6 +6,7 @@ use globset::Glob;
 use regex::Regex;
 use crate::exe_path;
 
+use super::action::{missing_fields, rejected_fields};
 use super::model::{ActionConfig, GlobalConfig, RulesConfig};
 use super::types::ActionType;
 use crate::actions::command::VALID_SHELLS;
@@ -333,20 +334,19 @@ fn collect_executable_errors(program: &str, rule_name: &str, label: &str, errors
 }
 
 pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
+	// 必須項目と「その type では効かない項目」の判定は config/action.rs の表が持つ。
+	// ここに条件を書き写すと、型を足したときに片方だけ直し忘れる。
+	for missing in missing_fields(action) {
+		errors.push(missing.message(rule_name, action.type_));
+	}
+	for rejected in rejected_fields(action) {
+		errors.push(rejected.message(rule_name, action.type_));
+	}
+
+	// ここから下は「書かれている値が使えるか」の検査。
+	// 表では表せないので、型ごとに個別に見る。
 	match action.type_ {
 		ActionType::Copy | ActionType::Move => {
-			if action.destination.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Copy / Move のとき、destination(コピー先/移動先) を定義してください", rule_name));
-			}
-			if action.overwrite.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Copy / Move のとき、overwrite(上書きの有無) を定義してください", rule_name));
-			}
-			if action.preserve_structure.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Copy / Move のとき、preserve_structure(ディレクトリ構造を保持するか) を定義してください", rule_name));
-			}
-			if action.verify_integrity.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Copy / Move のとき、verify_integrity(コピー後にファイルの完全性を検証するか) を定義してください", rule_name));
-			}
 			if let Some(dest) = &action.destination {
 				// auto_create は設定読み込み時に global の既定値が焼き込まれている。
 				// 未解決（None）のまま来た場合は自動作成側を既定とする。
@@ -357,22 +357,9 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 					errors,
 				);
 			}
-			// wait / timeout_ms は外部プロセスを起動する command / execute 専用。
-			// copy / move に書かれていても効かないので、黙って無視せずエラーにする。
-			// （設定読み込み時に copy / move へは焼き込んでいないので、ここに値が
-			//   入っているのは利用者が書いた場合だけ）
-			if action.wait.is_some() {
-				errors.push(format!("監視ルール名 {} のアクションの wait は type が Command / Execute のときだけ指定できます（Copy / Move では外部プロセスを起動しません）", rule_name));
-			}
-			if action.timeout_ms.is_some() {
-				errors.push(format!("監視ルール名 {} のアクションの timeout_ms は type が Command / Execute のときだけ指定できます（Copy / Move では外部プロセスを起動しません）", rule_name));
-			}
 		}
 
 		ActionType::Command => {
-			if action.shell.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Command のとき、shell(コマンドを実行するシェル) を定義してください", rule_name));
-			}
 			// 起動時に弾かないと、実行時に検知のたび失敗し続けることになる。
 			if let Some(shell) = &action.shell {
 				if !VALID_SHELLS.contains(&shell.to_lowercase().as_str()) {
@@ -387,41 +374,25 @@ pub(crate) fn collect_action_errors(action: &ActionConfig, rule_name: &str, erro
 					collect_executable_errors(program, rule_name, &format!("shell '{shell}' の実行ファイル"), errors);
 				}
 			}
-			if action.command.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Command のとき、command(実行するコマンド) を定義してください", rule_name));
-			}
-			if action.working_dir.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Command のとき、working_dir(コマンド/プログラムを実行するディレクトリ) を定義してください", rule_name));
-			}
-			if let Some(dir) = &action.working_dir {
-				if !dir.is_empty() && !Path::new(dir).is_dir() {
-					errors.push(format!("監視ルール名 {} のアクションの working_dir が存在しません: {}", rule_name, dir));
-				}
-			}
+			collect_working_dir_errors(action, rule_name, errors);
 		}
 
 		ActionType::Execute => {
-			if action.program.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Execute のとき、program(実行するプログラム) を定義してください", rule_name));
-			}
-			if action.args.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Execute のとき、args(プログラムに渡す引数) を定義してください。引数がない場合は空の配列を指定してください", rule_name));
-			}
-			if action.working_dir.is_none() {
-				errors.push(format!("監視ルール名 {} のアクションの type が Execute のとき、working_dir(コマンド/プログラムを実行するディレクトリ) を定義してください", rule_name));
-			}
-			if let Some(dir) = &action.working_dir {
-				if !dir.is_empty() && !Path::new(dir).is_dir() {
-					errors.push(format!("監視ルール名 {} のアクションの working_dir が存在しません: {}", rule_name, dir));
-				}
-			}
+			collect_working_dir_errors(action, rule_name, errors);
 			if let Some(program) = &action.program {
 				// 従来は絶対パスのときだけ存在を見ていた。名前だけの指定（"pwsh" など）は
 				// 素通りして実行時に初めて失敗していたので、PATH 解決まで確かめる。
 				collect_executable_errors(program, rule_name, "program", errors);
 			}
 		}
+	}
+}
 
+/// working_dir は command / execute で共通。空文字は「変更しない」の意味。
+fn collect_working_dir_errors(action: &ActionConfig, rule_name: &str, errors: &mut Vec<String>) {
+	let Some(dir) = &action.working_dir else { return };
+	if !dir.is_empty() && !Path::new(dir).is_dir() {
+		errors.push(format!("監視ルール名 {} のアクションの working_dir が存在しません: {}", rule_name, dir));
 	}
 }
 

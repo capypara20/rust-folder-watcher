@@ -8,7 +8,7 @@ pub(crate) mod spawn;
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::config::{ActionConfig, ActionType, RetryConfig};
+use crate::config::{Action, ActionConfig, RetryConfig};
 use crate::error::AppError;
 use crate::logger::Logger;
 use crate::placeholder::PlaceholderContext;
@@ -68,13 +68,25 @@ impl ActionSink {
     }
 }
 
-/// ログに出すアクション種別の表記。
-fn action_type_label(type_: &ActionType) -> &'static str {
-    match type_ {
-        ActionType::Copy => "copy",
-        ActionType::Move => "move",
-        ActionType::Command => "command",
-        ActionType::Execute => "execute",
+/// 開始ログに出す「何をするか」の 1 行。
+///
+/// 変換済みの [`Action`] を受けるので、`unwrap_or("")` で
+/// 設定漏れを空文字として素通りさせることがない。
+fn action_detail(action: &Action) -> String {
+    match action {
+        // 設定に書かれた文字列をそのまま出すと、他のログ行（OS 由来の区切り）と
+        // 表記が食い違う。パスなので区切り文字を揃えてよい。
+        Action::Copy(t) | Action::Move(t) => format!(
+            "destination={}  overwrite={}",
+            crate::path_fmt::normalize(&t.destination),
+            t.overwrite
+        ),
+        Action::Command(c) => format!("shell={}  command={}", c.shell, c.command),
+        Action::Execute(e) => {
+            // program はパスなので揃える。args は値やスイッチが混ざるので触らない。
+            let program = crate::path_fmt::normalize(&e.program);
+            format!("{program} {}", e.args.join(" ")).trim_end().to_string()
+        }
     }
 }
 
@@ -94,7 +106,7 @@ fn skipped_summary(actions: &[ActionConfig], failed_index: usize) -> Option<Stri
             format!(
                 "{}.{}",
                 failed_index + 1 + offset,
-                action_type_label(&a.type_)
+                a.type_.as_str()
             )
         })
         .collect::<Vec<_>>()
@@ -134,41 +146,29 @@ pub async fn execute_chain(
             tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
         }
 
-        let result: Result<Option<std::path::PathBuf>, AppError> = match action.type_ {
-            ActionType::Copy => {
-                // 設定に書かれた文字列をそのまま出すと、他のログ行（OS 由来の区切り）と
-                // 表記が食い違う。パスなので区切り文字を揃えてよい。
-                let dest_str = crate::path_fmt::normalize(action.destination.as_deref().unwrap_or(""));
-                let overwrite = action.overwrite.unwrap_or(false);
-                let detail = format!("destination={dest_str}  overwrite={overwrite}");
-                sink.action_start(index, total, action_type_label(&action.type_), detail);
-                copy::execute(action, src, &ctx, retry, &sink, step).await
+        // 種類ごとに必須項目を揃えた形へ変換する。起動時のバリデーションを
+        // 通っていれば必ず成功するので、ここが失敗するのは設定の読み込み経路の
+        // バグ。黙って空文字で動かさず、そのアクションを失敗させる。
+        let validated = match Action::try_from(action) {
+            Ok(v) => v,
+            Err(missing) => {
+                let e = AppError::from(missing);
+                sink.err(index, total, format!("{e}"));
+                if let Some(msg) = skipped_summary(actions, index) {
+                    sink.warn(index, total, msg);
+                }
+                return Err(e);
             }
-            ActionType::Move => {
-                // 設定に書かれた文字列をそのまま出すと、他のログ行（OS 由来の区切り）と
-                // 表記が食い違う。パスなので区切り文字を揃えてよい。
-                let dest_str = crate::path_fmt::normalize(action.destination.as_deref().unwrap_or(""));
-                let overwrite = action.overwrite.unwrap_or(false);
-                let detail = format!("destination={dest_str}  overwrite={overwrite}");
-                sink.action_start(index, total, action_type_label(&action.type_), detail);
-                r#move::execute(action, src, &ctx, retry, &sink, step).await
-            }
-            ActionType::Command => {
-                let shell = action.shell.as_deref().unwrap_or("");
-                let cmd = action.command.as_deref().unwrap_or("");
-                let detail = format!("shell={shell}  command={cmd}");
-                sink.action_start(index, total, action_type_label(&action.type_), detail);
-                command::execute(action, &ctx, &sink, step).await.map(|_| None)
-            }
-            ActionType::Execute => {
-                // program はパスなので揃える。args は値やスイッチが混ざるので触らない。
-                let program = crate::path_fmt::normalize(action.program.as_deref().unwrap_or(""));
-                let args = action.args.as_deref().unwrap_or(&[]);
-                let args_str = args.join(" ");
-                let detail = format!("{program} {args_str}").trim_end().to_string();
-                sink.action_start(index, total, action_type_label(&action.type_), detail);
-                execute::execute(action, &ctx, &sink, step).await.map(|_| None)
-            }
+        };
+
+        let detail = action_detail(&validated);
+        sink.action_start(index, total, action.type_.as_str(), detail);
+
+        let result: Result<Option<std::path::PathBuf>, AppError> = match &validated {
+            Action::Copy(_) => copy::execute(action, src, &ctx, retry, &sink, step).await,
+            Action::Move(_) => r#move::execute(action, src, &ctx, retry, &sink, step).await,
+            Action::Command(_) => command::execute(action, &ctx, &sink, step).await.map(|_| None),
+            Action::Execute(_) => execute::execute(action, &ctx, &sink, step).await.map(|_| None),
         };
 
         match result {
